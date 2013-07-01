@@ -1,0 +1,8 @@
+bin
+build
+target
+test-output
+.classpath
+.settings
+.project
+.gradle

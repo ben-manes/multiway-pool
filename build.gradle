@@ -1,0 +1,77 @@
+apply plugin: 'java'
+apply plugin: 'nexus'
+
+group = 'com.github.ben-manes'
+
+buildscript {
+  repositories {
+    mavenCentral()
+  }
+
+  dependencies {
+    classpath 'org.gradle.api.plugins:gradle-nexus-plugin:0.2'
+  }
+}
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  compile 'com.google.guava:guava:14.0.1'
+  compile 'com.google.code.findbugs:jsr305:2.0.1'
+
+  testCompile "org.hamcrest:hamcrest-all:1.3"
+  testCompile dependencies.create("org.testng:testng:6.8.5") {
+    exclude group: "junit"
+  }
+}
+
+test {
+  useTestNG()
+}
+
+jar {
+  manifest {
+      attributes 'Implementation-Title': 'Multiway Object Pool',
+                 'Built-By': System.getProperty('user.name'),
+                 'Built-Date': new Date(),
+                 'Built-JDK': System.getProperty('java.version'),
+                 'Built-Gradle': gradle.gradleVersion
+  }
+}
+
+modifyPom {
+  project {
+    name 'Multiway pool'
+    description 'Multiway object pool'
+    url 'https://github.com/ben-manes/multiway-pool'
+    inceptionYear '2013'
+  
+    scm {
+      url 'https://github.com/ben-manes/multiway-pool'
+      connection 'scm:https://ben-manes@github.com/ben-manes/multiway-pool.git'
+      developerConnection 'scm:git://github.com/ben-manes/multiway-pool.git'
+    }
+  
+    licenses {
+      license {
+        name 'The Apache Software License, Version 2.0'
+        url 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+        distribution 'repo'
+      }
+    }
+  
+    developers {
+      developer {
+        id 'ben-manes'
+        name 'Ben Manes'
+        email 'ben.manes@gmail.com'
+      }
+    }
+  }
+}
+
+task wrapper(type: Wrapper, description: 'Generates the gradle wrapper.') {
+  gradleVersion = '1.6'
+}
