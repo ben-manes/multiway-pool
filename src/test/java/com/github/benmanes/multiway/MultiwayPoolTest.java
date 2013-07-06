@@ -15,17 +15,22 @@
  */
 package com.github.benmanes.multiway;
 
+import java.util.Deque;
 import java.util.List;
+import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 import com.github.benmanes.multiway.MultiwayPool.ResourceHandle;
 import com.github.benmanes.multiway.ResourceKey.Status;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Queues;
 import com.google.common.testing.FakeTicker;
 import com.google.common.testing.GcFinalization;
 import org.testng.annotations.BeforeMethod;
@@ -34,6 +39,7 @@ import org.testng.annotations.Test;
 import static com.jayway.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
@@ -338,6 +344,54 @@ public final class MultiwayPoolTest {
     assertThat(multiway.transferQueues.size(), is(0L));
   }
 
+  // FIXME: bug!!!
+  @Test
+  public void concurrent() throws Exception {
+    long maxSize = 10;
+    multiway = MultiwayPool.newBuilder().maximumSize(maxSize).build(lifecycle);
+
+    ConcurrentTestHarness.timeTasks(10, new Runnable() {
+      final ThreadLocalRandom random = ThreadLocalRandom.current();
+
+      @Override
+      public void run() {
+        Deque<Handle<?>> handles = Queues.newArrayDeque();
+        for (int i = 0; i < 100; i++) {
+          execute(handles);
+        }
+        for (Handle<?> handle : handles) {
+          handle.release();
+        }
+      }
+
+      void execute(Deque<Handle<?>> handles) {
+        if (random.nextBoolean()) {
+          int key = random.nextInt(5);
+          handles.add(multiway.borrow(key));
+        } else if (!handles.isEmpty()) {
+          handles.remove().release();
+        }
+        Thread.yield();
+        LockSupport.parkNanos(1L);
+      }
+    });
+    multiway.cleanUp();
+
+    long size = multiway.cache.size();
+    long queued = 0;
+    for (Queue<?> queue : multiway.transferQueues.asMap().values()) {
+      queued += queue.size();
+    }
+    try {
+      assertThat(queued, is(size));
+      assertThat(size, lessThanOrEqualTo(maxSize));
+      assertThat(lifecycle.releases(), is(lifecycle.borrows()));
+      assertThat(multiway.generator.get(), is(greaterThanOrEqualTo(size)));
+    } catch (Error e) {
+      throw e;
+    }
+  }
+
   private UUID getAndRelease(Object key) {
     Handle<UUID> handle = multiway.borrow(key);
     UUID resource = handle.get();
@@ -370,7 +424,7 @@ public final class MultiwayPoolTest {
     }
 
     @Override
-    public void onRemoval(Object key, UUID value) {
+    public void onRemoval(Object key, UUID resource) {
       removals.incrementAndGet();
     }
 

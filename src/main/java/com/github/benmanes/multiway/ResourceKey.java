@@ -33,19 +33,19 @@ import static com.google.common.base.Preconditions.checkNotNull;
 @ThreadSafe
 final class ResourceKey<K> {
 
-  /** The status of the entry in the pool. */
+  /** The status of the resource in the pool. */
   enum Status {
 
-    /** The entry is available to be used. */
+    /** The resource is available to be used. */
     IDLE,
 
-    /** The entry is in use and in the cache */
+    /** The resource is in use and in the cache */
     IN_FLIGHT,
 
-    /** The entry is in use and evicted from the cache */
+    /** The resource is in use and evicted from the cache */
     RETIRED,
 
-    /** The entry is not in use and not cached */
+    /** The resource is not in use and not cached */
     DEAD
   }
 
@@ -54,7 +54,7 @@ final class ResourceKey<K> {
   final AtomicReference<Status> status;
   final TransferQueue<ResourceKey<K>> queue;
 
-  public ResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key, long id) {
+  ResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key, long id) {
     this.status = Atomics.newReference(status);
     this.queue = checkNotNull(queue);
     this.key = checkNotNull(key);
@@ -76,6 +76,13 @@ final class ResourceKey<K> {
     return queue;
   }
 
+  /** Removes the resource key from its transfer queue. */
+  void removeFromTransferQueue() {
+    getQueue().remove(this);
+  }
+
+  /* ---------------- IDLE --> ? -------------- */
+
   /** Attempts to transition the entry from idle to in-flight (when borrowing). */
   boolean goFromIdleToInFlight() {
     return status.compareAndSet(Status.IDLE, Status.IN_FLIGHT);
@@ -91,10 +98,7 @@ final class ResourceKey<K> {
     return status.compareAndSet(Status.IDLE, Status.DEAD);
   }
 
-  /** Attempts to transition the entry from retired to dead (when releasing the handle). */
-  boolean goFromRetiredToDead() {
-    return status.compareAndSet(Status.RETIRED, Status.DEAD);
-  }
+  /* ---------------- IN_FLIGHT --> ? -------------- */
 
   /** Attempts to transition the entry from in-flight to retired (when evicting from the cache). */
   boolean goFromInFlightToRetired() {
@@ -106,14 +110,16 @@ final class ResourceKey<K> {
     return status.compareAndSet(Status.IN_FLIGHT, Status.IDLE);
   }
 
-  /** Removes the resource key from its transfer queue. */
-  void removeFromTransferQueue() {
-    getQueue().remove(this);
+  /* ---------------- RETIRED --> ? -------------- */
+
+  /** Attempts to transition the entry from retired to dead (when releasing the handle). */
+  boolean goFromRetiredToDead() {
+    return status.compareAndSet(Status.RETIRED, Status.DEAD);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(getKey(), id);
+    return Objects.hashCode(key, id);
   }
 
   @Override
@@ -131,7 +137,7 @@ final class ResourceKey<K> {
   public String toString() {
     return Objects.toStringHelper(this)
         .add("status", status)
-        .add("key", getKey())
+        .add("key", key)
         .add("id", id)
         .toString();
   }

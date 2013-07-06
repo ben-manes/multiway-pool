@@ -31,6 +31,7 @@ import com.google.common.base.Supplier;
  * <pre>   {@code
  *   Handle<RandomAccessFile> handle = files.borrow(new File("db_table"));
  *   try {
+ *     RandomAccessFile randomAccessFile = handle.get();
  *     // access the resource protected by this handle
  *   } finally {
  *     handle.release();
@@ -41,6 +42,14 @@ import com.google.common.base.Supplier;
  */
 @NotThreadSafe
 public interface Handle<R> extends Supplier<R> {
+
+  /**
+   * Retrieves the resource protected by this handle.
+   *
+   * @throws IllegalStateException if the handle was released
+   */
+  @Override
+  R get();
 
   /**
    * Returns the resource to the object pool. If the resource has been evicted by the pool, it

@@ -234,12 +234,13 @@ public final class MultiwayPool<K, R> {
 
     @Override
     public R get() {
-      checkState(resource != null, "Stale handle to the resource for the key %s", resourceKey.getKey());
+      validate();
       return resource;
     }
 
     @Override
     public void release() {
+      validate();
       try {
         lifecycle.onRelease(resourceKey.getKey(), resource);
       } finally {
@@ -249,12 +250,17 @@ public final class MultiwayPool<K, R> {
 
     @Override
     public void invalidate() {
+      validate();
       try {
         lifecycle.onRelease(resourceKey.getKey(), resource);
       } finally {
         cache.invalidate(resourceKey);
         recycle();
       }
+    }
+
+    void validate() {
+      checkState(resource != null, "Stale handle to the resource for %s", resourceKey.getKey());
     }
 
     /** Returns the resource to the pool or discards it if the resource is no longer cached. */
@@ -402,7 +408,7 @@ public final class MultiwayPool<K, R> {
    * <p>
    * Usage example:
    * <pre>   {@code
-   *   MultiwayPool<File, RandomAccessFile> graphs = MultiwayPool.newBuilder()
+   *   MultiwayPool<File, RandomAccessFile> files = MultiwayPool.newBuilder()
    *       .maximumSize(100)
    *       .expireAfterWrite(10, TimeUnit.MINUTES)
    *       .build(
@@ -478,8 +484,8 @@ public final class MultiwayPool<K, R> {
     /**
      * Specifies a nanosecond-precision time source for use in determining when entries should be
      * expired. By default, {@link System#nanoTime} is used.
-     *
-     * <p>The primary intent of this method is to facilitate testing of caches which have been
+     * <p>
+     * The primary intent of this method is to facilitate testing of caches which have been
      * configured with {@link #expireAfterWrite} or {@link #expireAfterAccess}.
      *
      * @throws IllegalStateException if a ticker was already set
@@ -509,6 +515,7 @@ public final class MultiwayPool<K, R> {
      * @return a multiway pool having the requested features
      */
     public <K, R> MultiwayPool<K, R> build(ResourceLifecycle<K, R> lifecycle) {
+      checkNotNull(lifecycle);
       return new MultiwayPool<K, R>(this, lifecycle);
     }
   }
