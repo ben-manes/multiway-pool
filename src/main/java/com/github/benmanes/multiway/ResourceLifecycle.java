@@ -28,20 +28,20 @@ import javax.annotation.concurrent.ThreadSafe;
 public abstract class ResourceLifecycle<K, R> {
 
   /** Creates a resource corresponding to the {@code key}. */
-  abstract R create(K key) throws Exception;
+  public abstract R create(K key) throws Exception;
 
   /**
    * Notifies that a the resource was borrowed. This is called by the thread requesting the
    * resource, prior to being given the instance.
    */
-  void onBorrow(K key, R resource) {}
+  public void onBorrow(K key, R resource) {}
 
   /**
    * Notifies that the resource was released. This is called by the thread when releasing the
    * resource and may be called concurrently with a removal.
    */
-  void onRelease(K key, R resource) {}
+  public void onRelease(K key, R resource) {}
 
   /** Notifies that the resource was removed, e.g. due to eviction. */
-  void onRemoval(K key, R resource) {}
+  public void onRemoval(K key, R resource) {}
 }

@@ -61,9 +61,19 @@ final class ResourceKey<K> {
     this.id = id;
   }
 
+  /** Retreives the resource category key. */
+  K getKey() {
+    return key;
+  }
+
   /** The status of the entry in the pool. */
   Status getStatus() {
     return status.get();
+  }
+
+  /** Retrieves the transfer queue the resource is associated with. */
+  TransferQueue<ResourceKey<K>> getQueue() {
+    return queue;
   }
 
   /** Attempts to transition the entry from idle to in-flight (when borrowing). */
@@ -98,12 +108,12 @@ final class ResourceKey<K> {
 
   /** Removes the resource key from its transfer queue. */
   void removeFromTransferQueue() {
-    queue.remove(this);
+    getQueue().remove(this);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(key, id);
+    return Objects.hashCode(getKey(), id);
   }
 
   @Override
@@ -121,7 +131,7 @@ final class ResourceKey<K> {
   public String toString() {
     return Objects.toStringHelper(this)
         .add("status", status)
-        .add("key", key)
+        .add("key", getKey())
         .add("id", id)
         .toString();
   }

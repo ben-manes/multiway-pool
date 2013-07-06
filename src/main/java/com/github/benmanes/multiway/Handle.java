@@ -28,7 +28,7 @@ import com.google.common.base.Supplier;
  * transactions, may be added by a decorator to the {@link MultiwayPool}.
  *
  * In most cases, the following idiom should be used:
- * <pre>{@code
+ * <pre>   {@code
  *   Handle<RandomAccessFile> handle = files.borrow(new File("db_table"));
  *   try {
  *     // access the resource protected by this handle
@@ -47,4 +47,7 @@ public interface Handle<R> extends Supplier<R> {
    * is immediately discarded. Otherwise the resource is available to be borrowed from the pool.
    */
   void release();
+
+  /** Returns the resource to the object pool to be immediately discarded. */
+  void invalidate();
 }

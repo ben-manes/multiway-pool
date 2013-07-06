@@ -19,6 +19,7 @@ import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TransferQueue;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import javax.annotation.Nullable;
@@ -26,9 +27,12 @@ import javax.annotation.concurrent.ThreadSafe;
 
 import com.github.benmanes.multiway.ResourceKey.Status;
 import com.google.common.base.Optional;
+import com.google.common.base.Throwables;
+import com.google.common.base.Ticker;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
+import com.google.common.cache.CacheStats;
 import com.google.common.cache.LoadingCache;
 import com.google.common.cache.RemovalCause;
 import com.google.common.cache.RemovalListener;
@@ -41,7 +45,7 @@ import static com.google.common.base.Preconditions.checkState;
 /**
  * A concurrent object pool that supports pooling multiple resources that are associated with a
  * single key. A resource is borrowed from the pool, used exclusively, and released back for reuse
- * by another client. This implementation can optionally be bounded by a maximum size, time-to-live,
+ * by another caller. This implementation can optionally be bounded by a maximum size, time-to-live,
  * or time-to-idle policies.
  * <p>
  * A traditional object pool is homogeneous; all of the resources are identical in the data and
@@ -53,9 +57,9 @@ import static com.google.common.base.Preconditions.checkState;
  * <p>
  * When this pool is bounded any resource is eligible for eviction regardless of the key that it is
  * associated with. A size based bound will evict resources by a best-effort LRU policy and a time
- * based policy will evict by either a time-to-idle and/or time-to-live policy. When a resource is
- * evicted the resource should be cleaned up, e.g. closing a network socket, by using an
- * {@link ResourceLifecycle}.
+ * based policy will evict by either a time-to-idle and/or time-to-live policy. The resource's life
+ * cycle can be instrumented, such as when cleaning up after eviction, by using the appropriate
+ * {@link ResourceLifecycle} method.
  *
  * @author Ben Manes (ben.manes@gmail.com)
  */
@@ -81,11 +85,16 @@ public final class MultiwayPool<K, R> {
    * feature may need to be rewritten to use the lock amortization or similar techniques in the
    * future.
    *
-   * The removal of unused pools is performed aggressively by using weak references. The resource's
-   * cache key retains a strong reference to its pool, thereby retaining the pool while there are
-   * associated resources in the cache or it is being used. When there are no resources associated
-   * to the pool then the garbage collector will eagerly discard the pool.
+   * The removal of unused queues is performed aggressively by using weak references. The resource's
+   * cache key retains a strong reference to its queue, thereby retaining the pool while there are
+   * associated resources in the cache or it is being used. When there are no resources referencing
+   * to the queue then the garbage collector will eagerly discard the queue.
    */
+
+  static final Logger log = Logger.getLogger(MultiwayPool.class.getName());
+
+  /** The duration of time to wait when trying to exchange resources. */
+  static long XFER_WAIT_TIME_MS = 1;
 
   final LoadingCache<K, TransferQueue<ResourceKey<K>>> transferQueues;
   final Optional<Cache<ResourceKey<K>, R>> idleCache;
@@ -125,10 +134,16 @@ public final class MultiwayPool<K, R> {
     if (builder.expireAfterWriteNanos != Builder.UNSET_INT) {
       cacheBuilder.expireAfterWrite(builder.expireAfterWriteNanos, TimeUnit.NANOSECONDS);
     }
+    if (builder.ticker != null) {
+      cacheBuilder.ticker(builder.ticker);
+    }
+    if (builder.recordStats) {
+      cacheBuilder.recordStats();
+    }
     return cacheBuilder.removalListener(new CacheRemovalListener()).build(
         new CacheLoader<ResourceKey<K>, R>() {
           @Override public R load(ResourceKey<K> resourceKey) throws Exception {
-            R resource = lifecycle.create(resourceKey.key);
+            R resource = lifecycle.create(resourceKey.getKey());
             if (idleCache.isPresent()) {
               idleCache.get().put(resourceKey, resource);
             }
@@ -142,7 +157,11 @@ public final class MultiwayPool<K, R> {
     if (builder.expireAfterAccessNanos == -1) {
       return Optional.absent();
     }
-    Cache<ResourceKey<K>, R> idle = CacheBuilder.newBuilder()
+    CacheBuilder<Object, Object> cacheBuilder = CacheBuilder.newBuilder();
+    if (builder.ticker != null) {
+      cacheBuilder.ticker(builder.ticker);
+    }
+    Cache<ResourceKey<K>, R> idle = cacheBuilder
         .expireAfterAccess(builder.expireAfterAccessNanos, TimeUnit.NANOSECONDS)
         .removalListener(new IdleCacheRemovalListener())
         .build();
@@ -168,17 +187,39 @@ public final class MultiwayPool<K, R> {
 
   /** Retrieves the next available cache entry key, creating it if necessary. */
   ResourceKey<K> getResourceKey(K key) {
-    TransferQueue<ResourceKey<K>> pool = transferQueues.getUnchecked(key);
-    for (;;) {
-      ResourceKey<K> resourceKey = pool.poll();
-      if (resourceKey == null) {
-        return new ResourceKey<K>(pool, Status.IN_FLIGHT, key, generator.incrementAndGet());
+    try {
+      TransferQueue<ResourceKey<K>> pool = transferQueues.getUnchecked(key);
+      for (;;) {
+        ResourceKey<K> resourceKey = pool.poll(XFER_WAIT_TIME_MS, TimeUnit.MILLISECONDS);
+        if (resourceKey == null) {
+          return new ResourceKey<K>(pool, Status.IN_FLIGHT, key, generator.incrementAndGet());
+        }
+        Status status = resourceKey.getStatus();
+        if ((status == Status.IDLE) && resourceKey.goFromIdleToInFlight()) {
+          return resourceKey;
+        }
       }
-      Status status = resourceKey.getStatus();
-      if ((status == Status.IDLE) && resourceKey.goFromIdleToInFlight()) {
-        return resourceKey;
-      }
+    } catch (InterruptedException e) {
+      throw Throwables.propagate(e);
     }
+  }
+
+  /** Returns the approximate number of resources managed by the pool. */
+  long size() {
+    return cache.size();
+  }
+
+  /** Performs any pending maintenance operations needed by the pool. */
+  public void cleanUp() {
+    if (idleCache.isPresent()) {
+      idleCache.get().cleanUp();
+    }
+    cache.cleanUp();
+  }
+
+  /** Returns a current snapshot of this pool's cumulative cache statistics, if enabled. */
+  public CacheStats stats() {
+    return cache.stats();
   }
 
   /** A handle to a resource in the cache. */
@@ -193,15 +234,25 @@ public final class MultiwayPool<K, R> {
 
     @Override
     public R get() {
-      checkState(resource != null, "Stale handle to the resource for the key %s", resourceKey.key);
+      checkState(resource != null, "Stale handle to the resource for the key %s", resourceKey.getKey());
       return resource;
     }
 
     @Override
     public void release() {
       try {
-        lifecycle.onRelease(resourceKey.key, resource);
+        lifecycle.onRelease(resourceKey.getKey(), resource);
       } finally {
+        recycle();
+      }
+    }
+
+    @Override
+    public void invalidate() {
+      try {
+        lifecycle.onRelease(resourceKey.getKey(), resource);
+      } finally {
+        cache.invalidate(resourceKey);
         recycle();
       }
     }
@@ -226,8 +277,15 @@ public final class MultiwayPool<K, R> {
             }
 
             // Attempt to transfer the resource to another thread, else return it to the queue
-            if (!resourceKey.queue.tryTransfer(resourceKey)) {
-              resourceKey.queue.add(resourceKey);
+            try {
+              boolean transferred = resourceKey.getQueue().tryTransfer(
+                  resourceKey, XFER_WAIT_TIME_MS, TimeUnit.MILLISECONDS);
+              if (!transferred) {
+                resourceKey.getQueue().add(resourceKey);
+              }
+            } catch (InterruptedException e) {
+              resourceKey.getQueue().add(resourceKey);
+              log.log(Level.FINEST, "", e);
             }
 
             resource = null;
@@ -236,7 +294,7 @@ public final class MultiwayPool<K, R> {
             if (resourceKey.goFromRetiredToDead()) {
               R old = resource;
               resource = null;
-              lifecycle.onRemoval(resourceKey.key, old);
+              lifecycle.onRemoval(resourceKey.getKey(), old);
               return;
             }
           default:
@@ -253,8 +311,7 @@ public final class MultiwayPool<K, R> {
     protected void finalize() {
       if (resource != null) {
         String msg = String.format("Handle for %s -> %s was not properly released",
-            resourceKey.key.getClass().getName(), resource.getClass().getName());
-        Logger log = Logger.getLogger(MultiwayPool.class.getName());
+            resourceKey.getKey().getClass().getName(), resource.getClass().getName());
         log.warning(msg);
         release();
       }
@@ -282,7 +339,7 @@ public final class MultiwayPool<K, R> {
               if (idleCache.isPresent()) {
                 idleCache.get().invalidate(resourceKey);
               }
-              lifecycle.onRemoval(resourceKey.key, notification.getValue());
+              lifecycle.onRemoval(resourceKey.getKey(), notification.getValue());
               return;
             }
             break;
@@ -296,7 +353,7 @@ public final class MultiwayPool<K, R> {
             // A resource is already retired when it has been expired by the idle cache
             if (resourceKey.goFromRetiredToDead()) {
               resourceKey.removeFromTransferQueue();
-              lifecycle.onRemoval(resourceKey.key, notification.getValue());
+              lifecycle.onRemoval(resourceKey.getKey(), notification.getValue());
               return;
             }
             break;
@@ -332,7 +389,7 @@ public final class MultiwayPool<K, R> {
             break;
           default:
             // no-op
-            break;
+            return;
         }
       }
     }
@@ -344,7 +401,7 @@ public final class MultiwayPool<K, R> {
    * borrowed, released, or removed. By default instances will not perform any type of eviction.
    * <p>
    * Usage example:
-   * <pre>{@code
+   * <pre>   {@code
    *   MultiwayPool<File, RandomAccessFile> graphs = MultiwayPool.newBuilder()
    *       .maximumSize(100)
    *       .expireAfterWrite(10, TimeUnit.MINUTES)
@@ -359,6 +416,8 @@ public final class MultiwayPool<K, R> {
   public static final class Builder {
     static final int UNSET_INT = -1;
 
+    Ticker ticker;
+    boolean recordStats;
     long maximumSize = UNSET_INT;
     long expireAfterWriteNanos = UNSET_INT;
     long expireAfterAccessNanos = UNSET_INT;
@@ -413,6 +472,32 @@ public final class MultiwayPool<K, R> {
           "expireAfterAccess was already set to %s ns", expireAfterAccessNanos);
       checkArgument(duration >= 0, "duration cannot be negative: %s %s", duration, unit);
       expireAfterAccessNanos = unit.toNanos(duration);
+      return this;
+    }
+
+    /**
+     * Specifies a nanosecond-precision time source for use in determining when entries should be
+     * expired. By default, {@link System#nanoTime} is used.
+     *
+     * <p>The primary intent of this method is to facilitate testing of caches which have been
+     * configured with {@link #expireAfterWrite} or {@link #expireAfterAccess}.
+     *
+     * @throws IllegalStateException if a ticker was already set
+     */
+    public Builder ticker(Ticker ticker) {
+      checkState(this.ticker == null);
+      this.ticker = checkNotNull(ticker);
+      return this;
+    }
+
+    /**
+     * Enable the accumulation of {@link CacheStats} during the operation of the pool. Without this
+     * {@link Cache#stats} will return zero for all statistics. Note that recording stats requires
+     * bookkeeping to be performed with each operation, and thus imposes a performance penalty on
+     * cache operation.
+     */
+    public Builder recordStats() {
+      recordStats = true;
       return this;
     }
 

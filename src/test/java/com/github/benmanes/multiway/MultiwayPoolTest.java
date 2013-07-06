@@ -15,11 +15,18 @@
  */
 package com.github.benmanes.multiway;
 
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.github.benmanes.multiway.MultiwayPool.ResourceHandle;
 import com.github.benmanes.multiway.ResourceKey.Status;
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.Lists;
+import com.google.common.testing.FakeTicker;
 import com.google.common.testing.GcFinalization;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
@@ -28,6 +35,7 @@ import static com.jayway.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
 
 /**
@@ -36,11 +44,13 @@ import static org.hamcrest.Matchers.not;
 public final class MultiwayPoolTest {
   private static final Object KEY_1 = new Object();
 
+  private FakeTicker ticker;
   private TestResourceLifecycle lifecycle;
   private MultiwayPool<Object, UUID> multiway;
 
   @BeforeMethod
   public void beforeMethod() {
+    ticker = new FakeTicker();
     lifecycle = new TestResourceLifecycle();
     multiway = MultiwayPool.newBuilder().build(lifecycle);
   }
@@ -50,16 +60,23 @@ public final class MultiwayPoolTest {
     ConcurrentTestHarness.timeTasks(10, new Runnable() {
       @Override public void run() {
         for (int i = 0; i < 100; i++) {
-          getValue(KEY_1);
+          getAndRelease(KEY_1);
         }
       }
     });
+    long size = multiway.cache.size();
+    assertThat(lifecycle.borrows(), is(1000));
+    assertThat(lifecycle.releases(), is(1000));
+    assertThat(multiway.cache.size(), is(size));
+    assertThat(multiway.generator.get(), is(size));
+    assertThat(multiway.cache.size(), lessThanOrEqualTo(10L));
+    assertThat(multiway.transferQueues.get(KEY_1).size(), is((int) size));
   }
 
   @Test
   public void borrow_sameInstance() {
-    UUID expected = getValue(KEY_1);
-    UUID actual = getValue(KEY_1);
+    UUID expected = getAndRelease(KEY_1);
+    UUID actual = getAndRelease(KEY_1);
     assertThat(expected, is(actual));
     assertThat(lifecycle.borrows(), is(2));
     assertThat(lifecycle.releases(), is(2));
@@ -74,54 +91,186 @@ public final class MultiwayPoolTest {
   }
 
   @Test
-  public void borrow_fromTransfer() {
-    // TODO
+  public void borrow_fromTransfer() throws Exception {
+    getAndRelease(KEY_1);
+    long old = MultiwayPool.XFER_WAIT_TIME_MS;
+    MultiwayPool.XFER_WAIT_TIME_MS = TimeUnit.MINUTES.toMillis(1);
+
+    Stopwatch stopwatch = new Stopwatch().start();
+    final AtomicBoolean start = new AtomicBoolean();
+    final AtomicBoolean done = new AtomicBoolean();
+    new Thread() {
+      @Override public void run() {
+        start.set(true);
+        getAndRelease(KEY_1);
+        done.set(true);
+      }
+    }.start();
+
+    await().untilTrue(start);
+    assertThat(done.get(), is(false));
+    Handle<?> handle = multiway.borrow(KEY_1);
+    await().untilTrue(done);
+    MultiwayPool.XFER_WAIT_TIME_MS = old;
+    handle.release();
+
+    assertThat(stopwatch.elapsed(TimeUnit.MINUTES), is(0L));
   }
 
   @Test
   public void evict_immediately() {
     multiway = MultiwayPool.newBuilder().maximumSize(0).build(lifecycle);
-    UUID first = getValue(KEY_1);
-    UUID second = getValue(KEY_1);
+    UUID first = getAndRelease(KEY_1);
+    UUID second = getAndRelease(KEY_1);
     assertThat(first, is(not(second)));
     assertThat(lifecycle.removals(), is(2));
-    assertThat(multiway.cache.size(), is(0L));
+    assertThat(multiway.size(), is(0L));
     assertThat(multiway.transferQueues.getIfPresent(KEY_1), is(empty()));
   }
 
   @Test
   public void evict_whenIdle() {
-    // TODO
+    getAndRelease(KEY_1);
+    ResourceKey<?> resourceKey = getResourceKey();
+    assertThat(resourceKey.getStatus(), is(Status.IDLE));
+
+    multiway.cache.invalidateAll();
+    assertThat(multiway.size(), is(0L));
+    assertThat(resourceKey.getStatus(), is(Status.DEAD));
   }
 
   @Test
   public void evict_whenInFlight() {
-    // TODO
+    getAndRelease(KEY_1);
+    ResourceKey<?> resourceKey = getResourceKey();
+    assertThat(resourceKey.getStatus(), is(Status.IDLE));
+
+    multiway.cache.invalidateAll();
+    assertThat(multiway.size(), is(0L));
+    assertThat(resourceKey.getStatus(), is(Status.DEAD));
+  }
+
+  @Test
+  public void evict_whenRetired() {
+    getAndRelease(KEY_1);
+    ResourceKey<?> resourceKey = getResourceKey();
+
+    // Simulate transition due to idle cache expiration
+    resourceKey.goFromIdleToRetired();
+
+    multiway.cache.invalidateAll();
+    assertThat(multiway.size(), is(0L));
+    assertThat(lifecycle.borrows(), is(1));
+    assertThat(lifecycle.releases(), is(1));
+    assertThat(lifecycle.removals(), is(1));
+    assertThat(resourceKey.getStatus(), is(Status.DEAD));
+  }
+
+  @Test
+  public void evict_multipleQueues() {
+    for (int i = 0; i < 10; i++) {
+      getAndRelease(i);
+    }
+    assertThat(multiway.size(), is(10L));
+
+    multiway.cache.invalidateAll();
+    assertThat(multiway.size(), is(0L));
+    assertThat(lifecycle.borrows(), is(10));
+    assertThat(lifecycle.releases(), is(10));
+    assertThat(lifecycle.removals(), is(10));
   }
 
   @Test
   public void evict_maximumSize() {
-    // TODO
+    multiway = MultiwayPool.newBuilder().maximumSize(10).build(lifecycle);
+    List<Handle<?>> handles = Lists.newArrayList();
+    for (int i = 0; i < 100; i++) {
+      handles.add(multiway.borrow(KEY_1));
+    }
+    for (Handle<?> handle : handles) {
+      handle.release();
+    }
+    assertThat(multiway.size(), is(10L));
+    assertThat(lifecycle.borrows(), is(100));
+    assertThat(lifecycle.releases(), is(100));
+    assertThat(lifecycle.removals(), is(90));
   }
 
   @Test
-  public void evict_timeToIdle() {
-    // TODO
+  public void evict_expireAfterAccess() {
+    multiway = MultiwayPool.newBuilder().ticker(ticker)
+        .expireAfterAccess(1, TimeUnit.MINUTES)
+        .build(lifecycle);
+    List<Handle<?>> handles = Lists.newArrayList();
+    for (int i = 0; i < 100; i++) {
+      handles.add(multiway.borrow(KEY_1));
+    }
+    for (Handle<?> handle : handles) {
+      handle.release();
+    }
+    ticker.advance(10, TimeUnit.MINUTES);
+    multiway.cleanUp();
+
+    assertThat(multiway.size(), is(0L));
+    assertThat(lifecycle.borrows(), is(100));
+    assertThat(lifecycle.releases(), is(100));
+    assertThat(lifecycle.removals(), is(100));
   }
 
   @Test
-  public void evict_timeToLive() {
-    // TODO
+  public void evict_expireAfterWrite() {
+    multiway = MultiwayPool.newBuilder().ticker(ticker)
+        .expireAfterWrite(1, TimeUnit.MINUTES)
+        .build(lifecycle);
+    List<Handle<?>> handles = Lists.newArrayList();
+    for (int i = 0; i < 100; i++) {
+      handles.add(multiway.borrow(KEY_1));
+    }
+    for (Handle<?> handle : handles) {
+      handle.release();
+    }
+    ticker.advance(10, TimeUnit.MINUTES);
+    multiway.cleanUp();
+
+    assertThat(multiway.size(), is(0L));
+    assertThat(lifecycle.borrows(), is(100));
+    assertThat(lifecycle.releases(), is(100));
+    assertThat(lifecycle.removals(), is(100));
   }
 
   @Test
   public void release_toPool() {
-    // TODO
+    @SuppressWarnings("rawtypes")
+    ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);
+    assertThat(multiway.size(), is(1L));
+    assertThat(lifecycle.borrows(), is(1));
+    assertThat(lifecycle.releases(), is(0));
+    assertThat(lifecycle.removals(), is(0));
+    assertThat(handle.resourceKey.getStatus(), is(Status.IN_FLIGHT));
+
+    handle.release();
+    assertThat(multiway.size(), is(1L));
+    assertThat(lifecycle.releases(), is(1));
+    assertThat(lifecycle.removals(), is(0));
+    assertThat(handle.resourceKey.getStatus(), is(Status.IDLE));
   }
 
   @Test
   public void release_andDiscard() {
-    // TODO
+    @SuppressWarnings("rawtypes")
+    ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);
+
+    multiway.cache.invalidateAll();
+    assertThat(multiway.size(), is(0L));
+    assertThat(lifecycle.borrows(), is(1));
+    assertThat(lifecycle.releases(), is(0));
+    assertThat(lifecycle.removals(), is(0));
+    assertThat(handle.resourceKey.getStatus(), is(Status.RETIRED));
+
+    handle.release();
+    assertThat(lifecycle.releases(), is(1));
+    assertThat(lifecycle.removals(), is(1));
+    assertThat(handle.resourceKey.getStatus(), is(Status.DEAD));
   }
 
   @Test
@@ -139,6 +288,42 @@ public final class MultiwayPoolTest {
   }
 
   @Test
+  public void invalidate_whenInFlight() {
+    @SuppressWarnings("rawtypes")
+    ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);
+    assertThat(multiway.size(), is(1L));
+    assertThat(lifecycle.borrows(), is(1));
+    assertThat(lifecycle.releases(), is(0));
+    assertThat(lifecycle.removals(), is(0));
+    assertThat(handle.resourceKey.getStatus(), is(Status.IN_FLIGHT));
+
+    handle.invalidate();
+    assertThat(multiway.size(), is(0L));
+    assertThat(lifecycle.releases(), is(1));
+    assertThat(lifecycle.removals(), is(1));
+    assertThat(handle.resourceKey.getStatus(), is(Status.DEAD));
+  }
+
+  @Test
+  public void invalidate_whenRetired() {
+    @SuppressWarnings("rawtypes")
+    ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);
+    multiway.cache.invalidateAll();
+
+    assertThat(multiway.size(), is(0L));
+    assertThat(lifecycle.borrows(), is(1));
+    assertThat(lifecycle.releases(), is(0));
+    assertThat(lifecycle.removals(), is(0));
+    assertThat(handle.resourceKey.getStatus(), is(Status.RETIRED));
+
+    handle.invalidate();
+    assertThat(multiway.size(), is(0L));
+    assertThat(lifecycle.releases(), is(1));
+    assertThat(lifecycle.removals(), is(1));
+    assertThat(handle.resourceKey.getStatus(), is(Status.DEAD));
+  }
+
+  @Test
   public void discardPool() {
     Handle<UUID> handle = multiway.borrow(KEY_1);
     GcFinalization.awaitFullGc();
@@ -153,11 +338,15 @@ public final class MultiwayPoolTest {
     assertThat(multiway.transferQueues.size(), is(0L));
   }
 
-  private UUID getValue(Object key) {
-    Handle<UUID> handle = multiway.borrow(KEY_1);
-    UUID value = handle.get();
+  private UUID getAndRelease(Object key) {
+    Handle<UUID> handle = multiway.borrow(key);
+    UUID resource = handle.get();
     handle.release();
-    return value;
+    return resource;
+  }
+
+  private ResourceKey<Object> getResourceKey() {
+    return multiway.cache.asMap().keySet().iterator().next();
   }
 
   private static final class TestResourceLifecycle extends ResourceLifecycle<Object, UUID> {
@@ -166,7 +355,7 @@ public final class MultiwayPoolTest {
     final AtomicInteger removals = new AtomicInteger();
 
     @Override
-    UUID create(Object key) throws Exception {
+    public UUID create(Object key) throws Exception {
       return UUID.randomUUID();
     }
 
