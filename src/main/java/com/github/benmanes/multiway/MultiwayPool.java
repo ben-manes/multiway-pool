@@ -265,8 +265,8 @@ public final class MultiwayPool<K, R> {
 
     /** Returns the resource to the pool or discards it if the resource is no longer cached. */
     void recycle() {
-      Status status = resourceKey.getStatus();
       for (;;) {
+        Status status = resourceKey.getStatus();
         switch (status) {
           case IN_FLIGHT:
             if (!resourceKey.goFromInFlightToIdle()) {
@@ -289,6 +289,9 @@ public final class MultiwayPool<K, R> {
               if (!transferred) {
                 resourceKey.getQueue().add(resourceKey);
               }
+              if (resourceKey.getStatus() == Status.DEAD) {
+                resourceKey.removeFromTransferQueue();
+              }
             } catch (InterruptedException e) {
               resourceKey.getQueue().add(resourceKey);
               log.log(Level.FINEST, "", e);
@@ -307,6 +310,11 @@ public final class MultiwayPool<K, R> {
             throw new IllegalStateException("Unnexpected state: " + status);
         }
       }
+    }
+
+    @Override
+    public String toString() {
+      return String.valueOf(resourceKey);
     }
 
     /**

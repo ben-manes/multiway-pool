@@ -350,38 +350,44 @@ public final class MultiwayPoolTest {
     long maxSize = 10;
     multiway = MultiwayPool.newBuilder().maximumSize(maxSize).build(lifecycle);
 
-    ConcurrentTestHarness.timeTasks(10, new Runnable() {
+    ConcurrentTestHarness.timeTasks(25, new Runnable() {
       final ThreadLocalRandom random = ThreadLocalRandom.current();
 
       @Override
       public void run() {
         Deque<Handle<?>> handles = Queues.newArrayDeque();
         for (int i = 0; i < 100; i++) {
-          execute(handles);
+          execute(handles, i);
+          yield();
         }
         for (Handle<?> handle : handles) {
           handle.release();
         }
       }
 
-      void execute(Deque<Handle<?>> handles) {
+      void execute(Deque<Handle<?>> handles, int key) {
         if (random.nextBoolean()) {
-          int key = random.nextInt(5);
-          handles.add(multiway.borrow(key));
+          Handle<?> handle = multiway.borrow(key);
+          handles.add(handle);
         } else if (!handles.isEmpty()) {
-          handles.remove().release();
+          Handle<?> handle = handles.remove();
+          handle.release();
         }
+      }
+
+      void yield() {
         Thread.yield();
         LockSupport.parkNanos(1L);
       }
     });
     multiway.cleanUp();
 
-    long size = multiway.cache.size();
     long queued = 0;
+    long size = multiway.cache.size();
     for (Queue<?> queue : multiway.transferQueues.asMap().values()) {
       queued += queue.size();
     }
+
     try {
       assertThat(queued, is(size));
       assertThat(size, lessThanOrEqualTo(maxSize));
