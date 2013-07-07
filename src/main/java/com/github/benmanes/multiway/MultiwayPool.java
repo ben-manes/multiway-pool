@@ -94,9 +94,6 @@ public final class MultiwayPool<K, R> {
 
   static final Logger log = Logger.getLogger(MultiwayPool.class.getName());
 
-  /** The duration of time to wait when trying to exchange resources. */
-  static long XFER_WAIT_TIME_MS = 1;
-
   final LoadingCache<K, TransferQueue<ResourceKey<K>>> transferQueues;
   final Optional<Cache<ResourceKey<K>, R>> idleCache;
   final LoadingCache<ResourceKey<K>, R> cache;
@@ -172,14 +169,27 @@ public final class MultiwayPool<K, R> {
   }
 
   /**
-   * Retrieves a resource from the pool, creating it if necessary. The resource must be returned to
-   * the pool using {@link Handle#release()}.
+   * Retrieves a resource from the pool, immediately. If a resource is not available then one is
+   * created.
    *
    * @param key the category to qualify the type of resource to retrieve
    * @return a handle to the resource
    */
   public Handle<R> borrow(K key) {
-    ResourceHandle handle = getResourceHandle(key);
+    return borrow(key, 0L, TimeUnit.NANOSECONDS);
+  }
+
+  /**
+   * Retrieves a resource from the pool, waiting up to the specified wait time if necessary for one
+   * to become available. If a resource is not available then one is created.
+   *
+   * @param key the category to qualify the type of resource to retrieve
+   * @param timeout how long to wait before giving up and creating the resource
+   * @param unit a {@code TimeUnit} determining how to interpret the {@code duration} parameter
+   * @return a handle to the resource
+   */
+  public Handle<R> borrow(K key, long timeout, TimeUnit unit) {
+    ResourceHandle handle = getResourceHandle(key, timeout, unit);
     if (idleCache.isPresent()) {
       idleCache.get().invalidate(handle.resourceKey);
     }
@@ -188,20 +198,28 @@ public final class MultiwayPool<K, R> {
   }
 
   /** Retrieves the next available handler, creating the resource if necessary. */
-  ResourceHandle getResourceHandle(K key) {
+  ResourceHandle getResourceHandle(K key, long timeout, TimeUnit unit) {
     TransferQueue<ResourceKey<K>> queue = transferQueues.getUnchecked(key);
+    long timeoutNanos = unit.toNanos(timeout);
+    long startNanos = System.nanoTime();
     for (;;) {
-      ResourceHandle handle = tryToGetResourceHandle(key, queue);
-      if (handle != null) {
+      ResourceHandle handle = tryToGetResourceHandle(key, queue, timeoutNanos);
+      if (handle == null) {
+        long elapsed = System.nanoTime() - startNanos;
+        timeoutNanos = Math.max(0, timeoutNanos - elapsed);
+      } else {
         return handle;
       }
     }
   }
 
   /** Attempts to retrieves the next available handler, creating the resource if necessary. */
-  @Nullable ResourceHandle tryToGetResourceHandle(K key, TransferQueue<ResourceKey<K>> queue) {
+  @Nullable ResourceHandle tryToGetResourceHandle(K key,
+      TransferQueue<ResourceKey<K>> queue, long timeoutNanos) {
     try {
-      ResourceKey<K> resourceKey = queue.poll(XFER_WAIT_TIME_MS, TimeUnit.MILLISECONDS);
+      ResourceKey<K> resourceKey = (timeoutNanos == 0)
+          ? queue.poll()
+          : queue.poll(timeoutNanos, TimeUnit.NANOSECONDS);
       return (resourceKey == null)
           ? newResourceHandle(key, queue)
           : tryToGetPooledResourceHandle(resourceKey);
@@ -226,15 +244,16 @@ public final class MultiwayPool<K, R> {
       if ((status == Status.IDLE) && resourceKey.goFromIdleToInFlight()) {
         return new ResourceHandle(resourceKey, resource);
       }
+      return null;
     } catch (UncheckedExecutionException e) {
-      if (!(e.getCause() instanceof AlreadyInitializedException)) {
+      if (e.getCause() instanceof AlreadyInitializedException) {
         // The resource associated with the key was discarded, but due to race conditions the
         // key was handed out and the cache attempted to create a new instance. This exception
         // was thrown to reject that operation and retry with a different key.
-        throw e;
+        return null;
       }
+      throw e;
     }
-    return null;
   }
 
   /** Returns the approximate number of resources managed by the pool. */
@@ -273,11 +292,16 @@ public final class MultiwayPool<K, R> {
 
     @Override
     public void release() {
+      release(0L, TimeUnit.NANOSECONDS);
+    }
+
+    @Override
+    public void release(long timeout, TimeUnit unit) {
       validate();
       try {
         lifecycle.onRelease(resourceKey.getKey(), resource);
       } finally {
-        recycle();
+        recycle(timeout, unit);
       }
     }
 
@@ -288,7 +312,7 @@ public final class MultiwayPool<K, R> {
         lifecycle.onRelease(resourceKey.getKey(), resource);
       } finally {
         cache.invalidate(resourceKey);
-        recycle();
+        recycle(0L, TimeUnit.NANOSECONDS);
       }
     }
 
@@ -297,13 +321,13 @@ public final class MultiwayPool<K, R> {
     }
 
     /** Returns the resource to the pool or discards it if the resource is no longer cached. */
-    void recycle() {
+    void recycle(long timeout, TimeUnit unit) {
       for (;;) {
         Status status = resourceKey.getStatus();
         switch (status) {
           case IN_FLIGHT:
             if (resourceKey.goFromInFlightToIdle()) {
-              releaseToPool();
+              releaseToPool(timeout, unit);
               return;
             }
             break;
@@ -320,7 +344,7 @@ public final class MultiwayPool<K, R> {
     }
 
     /** Returns the resource to the pool so it can be borrowed by another caller. */
-    void releaseToPool() {
+    void releaseToPool(long timeout, TimeUnit unit) {
       // Add the resource to the idle cache if present. If the resource was removed for any
       // other reason while being added, it must then be discarded afterwards
       if (idleCache.isPresent()) {
@@ -332,8 +356,7 @@ public final class MultiwayPool<K, R> {
 
       // Attempt to transfer the resource to another thread, else return it to the queue
       try {
-        boolean transferred = resourceKey.getQueue().tryTransfer(
-            resourceKey, XFER_WAIT_TIME_MS, TimeUnit.MILLISECONDS);
+        boolean transferred = resourceKey.getQueue().tryTransfer(resourceKey, timeout, unit);
         if (!transferred) {
           resourceKey.getQueue().add(resourceKey);
         }
@@ -347,7 +370,7 @@ public final class MultiwayPool<K, R> {
       resource = null;
     }
 
-    /** Discards the resource after it has been become dead. */
+    /** Discards the resource after it has become dead. */
     void discardResource() {
       R old = resource;
       resource = null;

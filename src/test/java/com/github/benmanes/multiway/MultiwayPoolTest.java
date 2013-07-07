@@ -66,7 +66,8 @@ public final class MultiwayPoolTest {
     ConcurrentTestHarness.timeTasks(10, new Runnable() {
       @Override public void run() {
         for (int i = 0; i < 100; i++) {
-          getAndRelease(KEY_1);
+          Handle<UUID> handle = multiway.borrow(KEY_1, 1, TimeUnit.MILLISECONDS);
+          handle.release();
         }
       }
     });
@@ -98,17 +99,14 @@ public final class MultiwayPoolTest {
 
   @Test
   public void borrow_fromTransfer() throws Exception {
-    getAndRelease(KEY_1);
-    long old = MultiwayPool.XFER_WAIT_TIME_MS;
-    MultiwayPool.XFER_WAIT_TIME_MS = TimeUnit.MINUTES.toMillis(1);
-
     Stopwatch stopwatch = new Stopwatch().start();
     final AtomicBoolean start = new AtomicBoolean();
     final AtomicBoolean done = new AtomicBoolean();
     new Thread() {
       @Override public void run() {
         start.set(true);
-        getAndRelease(KEY_1);
+        Handle<UUID> handle = multiway.borrow(KEY_1);
+        handle.release(1, TimeUnit.MINUTES);
         done.set(true);
       }
     }.start();
@@ -117,7 +115,6 @@ public final class MultiwayPoolTest {
     assertThat(done.get(), is(false));
     Handle<?> handle = multiway.borrow(KEY_1);
     await().untilTrue(done);
-    MultiwayPool.XFER_WAIT_TIME_MS = old;
     handle.release();
 
     assertThat(stopwatch.elapsed(TimeUnit.MINUTES), is(0L));
@@ -289,8 +286,8 @@ public final class MultiwayPoolTest {
         return !multiway.transferQueues.getUnchecked(KEY_1).isEmpty();
       }
     });
-    ResourceKey<?> poolKey = multiway.transferQueues.getUnchecked(KEY_1).peek();
-    assertThat(poolKey.getStatus(), is(Status.IDLE));
+    ResourceKey<?> resourceKey = getResourceKey();
+    assertThat(resourceKey.getStatus(), is(Status.IDLE));
   }
 
   @Test

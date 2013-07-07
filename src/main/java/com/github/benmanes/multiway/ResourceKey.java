@@ -88,8 +88,8 @@ final class ResourceKey<K> {
    * The key is initialized to indicate that it is associated with a created resource. This check
    * avoids race conditions where the key may be transfered while the resource has simultaneously
    * been evicted from the cache. This results in a cache miss, a new resource being created, and
-   * additional race conditions with how state transitions are managed. This races are resolved by
-   * rejecting the initialization when creating the new resource.
+   * additional race conditions with how state transitions are managed. These races are resolved
+   * by rejecting the initialization when creating the new resource.
    *
    * @throws AlreadyInitializedException if the key was already assigned to a resource
    */

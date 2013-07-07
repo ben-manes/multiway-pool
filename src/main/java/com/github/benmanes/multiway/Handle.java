@@ -15,6 +15,8 @@
  */
 package com.github.benmanes.multiway;
 
+import java.util.concurrent.TimeUnit;
+
 import javax.annotation.concurrent.NotThreadSafe;
 
 import com.google.common.base.Supplier;
@@ -26,7 +28,7 @@ import com.google.common.base.Supplier;
  * subsequent call to retrieve a handle will return a new resource even if a handle for that
  * resource type is available at a higher scope. Support for scopes, such as used by database
  * transactions, may be added by a decorator to the {@link MultiwayPool}.
- *
+ * <p>
  * In most cases, the following idiom should be used:
  * <pre>   {@code
  *   Handle<RandomAccessFile> handle = files.borrow(new File("db_table"));
@@ -54,9 +56,27 @@ public interface Handle<R> extends Supplier<R> {
   /**
    * Returns the resource to the object pool. If the resource has been evicted by the pool, it
    * is immediately discarded. Otherwise the resource is available to be borrowed from the pool.
+   *
+   * @throws IllegalStateException if the handle was released
    */
   void release();
 
-  /** Returns the resource to the object pool to be immediately discarded. */
+  /**
+   * Returns the resource to the object pool, waiting up to the specified wait time to exchange it
+   * with a consumer. If the resource has been evicted by the pool, it is immediately discarded.
+   * Otherwise the resource is available to be borrowed from the pool if an exchange was not
+   * successful.
+   *
+   * @param timeout how long to wait for an exchange before giving up and releasing to the pool
+   * @param unit a {@code TimeUnit} determining how to interpret the {@code duration} parameter
+   * @throws IllegalStateException if the handle was released
+   */
+  void release(long timeout, TimeUnit unit);
+
+  /**
+   * Returns the resource to the object pool to be immediately discarded.
+   *
+   * @throws IllegalStateException if the handle was released
+   */
   void invalidate();
 }
