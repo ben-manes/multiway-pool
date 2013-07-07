@@ -344,13 +344,15 @@ public final class MultiwayPoolTest {
     assertThat(multiway.transferQueues.size(), is(0L));
   }
 
-  // FIXME: bug!!!
   @Test
   public void concurrent() throws Exception {
     long maxSize = 10;
-    multiway = MultiwayPool.newBuilder().maximumSize(maxSize).build(lifecycle);
+    multiway = MultiwayPool.newBuilder()
+        .expireAfterAccess(100, TimeUnit.NANOSECONDS)
+        .maximumSize(maxSize)
+        .build(lifecycle);
 
-    ConcurrentTestHarness.timeTasks(25, new Runnable() {
+    ConcurrentTestHarness.timeTasks(10, new Runnable() {
       final ThreadLocalRandom random = ThreadLocalRandom.current();
 
       @Override
@@ -388,14 +390,11 @@ public final class MultiwayPoolTest {
       queued += queue.size();
     }
 
-    try {
-      assertThat(queued, is(size));
-      assertThat(size, lessThanOrEqualTo(maxSize));
-      assertThat(lifecycle.releases(), is(lifecycle.borrows()));
-      assertThat(multiway.generator.get(), is(greaterThanOrEqualTo(size)));
-    } catch (Error e) {
-      throw e;
-    }
+    assertThat(queued, is(size));
+    assertThat(size, lessThanOrEqualTo(maxSize));
+    assertThat(lifecycle.releases(), is(lifecycle.borrows()));
+    assertThat(multiway.generator.get(), is(greaterThanOrEqualTo(size)));
+    assertThat(lifecycle.created(), is((int) size + lifecycle.removals()));
   }
 
   private UUID getAndRelease(Object key) {
@@ -410,12 +409,14 @@ public final class MultiwayPoolTest {
   }
 
   private static final class TestResourceLifecycle extends ResourceLifecycle<Object, UUID> {
+    final AtomicInteger created = new AtomicInteger();
     final AtomicInteger borrows = new AtomicInteger();
     final AtomicInteger releases = new AtomicInteger();
     final AtomicInteger removals = new AtomicInteger();
 
     @Override
     public UUID create(Object key) throws Exception {
+      created.incrementAndGet();
       return UUID.randomUUID();
     }
 
@@ -432,6 +433,10 @@ public final class MultiwayPoolTest {
     @Override
     public void onRemoval(Object key, UUID resource) {
       removals.incrementAndGet();
+    }
+
+    public int created() {
+      return created.get();
     }
 
     public int borrows() {

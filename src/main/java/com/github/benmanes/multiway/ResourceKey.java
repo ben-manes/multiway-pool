@@ -16,6 +16,7 @@
 package com.github.benmanes.multiway;
 
 import java.util.concurrent.TransferQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.annotation.concurrent.ThreadSafe;
@@ -51,11 +52,13 @@ final class ResourceKey<K> {
 
   final K key;
   final long id;
+  final AtomicBoolean initialized;
   final AtomicReference<Status> status;
   final TransferQueue<ResourceKey<K>> queue;
 
   ResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key, long id) {
     this.status = Atomics.newReference(status);
+    this.initialized = new AtomicBoolean();
     this.queue = checkNotNull(queue);
     this.key = checkNotNull(key);
     this.id = id;
@@ -79,6 +82,22 @@ final class ResourceKey<K> {
   /** Removes the resource key from its transfer queue. */
   void removeFromTransferQueue() {
     getQueue().remove(this);
+  }
+
+  /**
+   * The key is initialized to indicate that it is associated with a created resource. This check
+   * avoids race conditions where the key may be transfered while the resource has simultaneously
+   * been evicted from the cache. This results in a cache miss, a new resource being created, and
+   * additional race conditions with how state transitions are managed. This races are resolved by
+   * rejecting the initialization when creating the new resource.
+   *
+   * @throws AlreadyInitializedException if the key was already assigned to a resource
+   */
+  void initialize() {
+    if (initialized.get()) {
+      throw new AlreadyInitializedException();
+    }
+    initialized.lazySet(true);
   }
 
   /* ---------------- IDLE --> ? -------------- */
@@ -129,8 +148,8 @@ final class ResourceKey<K> {
     } else if (!(obj instanceof ResourceKey<?>)) {
       return false;
     }
-    ResourceKey<?> cacheKey = (ResourceKey<?>) obj;
-    return (id == cacheKey.id) && key.equals(cacheKey.key);
+    ResourceKey<?> resourceKey = (ResourceKey<?>) obj;
+    return (id == resourceKey.id) && key.equals(resourceKey.key);
   }
 
   @Override
@@ -140,5 +159,10 @@ final class ResourceKey<K> {
         .add("key", key)
         .add("id", id)
         .toString();
+  }
+
+  /** An exception to indicate that the key was already assigned to a resource. */
+  static final class AlreadyInitializedException extends RuntimeException {
+    private static final long serialVersionUID = 1L;
   }
 }

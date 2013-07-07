@@ -19,12 +19,12 @@ import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TransferQueue;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
+import com.github.benmanes.multiway.ResourceKey.AlreadyInitializedException;
 import com.github.benmanes.multiway.ResourceKey.Status;
 import com.google.common.base.Optional;
 import com.google.common.base.Throwables;
@@ -37,6 +37,7 @@ import com.google.common.cache.LoadingCache;
 import com.google.common.cache.RemovalCause;
 import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
+import com.google.common.util.concurrent.UncheckedExecutionException;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -45,8 +46,8 @@ import static com.google.common.base.Preconditions.checkState;
 /**
  * A concurrent object pool that supports pooling multiple resources that are associated with a
  * single key. A resource is borrowed from the pool, used exclusively, and released back for reuse
- * by another caller. This implementation can optionally be bounded by a maximum size, time-to-live,
- * or time-to-idle policies.
+ * by another caller. This implementation can optionally be bounded by maximum size, time-to-live,
+ * and/or time-to-idle policies.
  * <p>
  * A traditional object pool is homogeneous; all of the resources are identical in the data and
  * capabilities offered. For example a database connection pool to a shared database instance. A
@@ -143,6 +144,8 @@ public final class MultiwayPool<K, R> {
     return cacheBuilder.removalListener(new CacheRemovalListener()).build(
         new CacheLoader<ResourceKey<K>, R>() {
           @Override public R load(ResourceKey<K> resourceKey) throws Exception {
+            resourceKey.initialize();
+
             R resource = lifecycle.create(resourceKey.getKey());
             if (idleCache.isPresent()) {
               idleCache.get().put(resourceKey, resource);
@@ -176,27 +179,39 @@ public final class MultiwayPool<K, R> {
    * @return a handle to the resource
    */
   public Handle<R> borrow(K key) {
-    ResourceKey<K> resourceKey = getResourceKey(key);
-    R resource = cache.getUnchecked(resourceKey);
+    ResourceHandle handle = getResourceHandle(key);
     if (idleCache.isPresent()) {
-      idleCache.get().invalidate(resourceKey);
+      idleCache.get().invalidate(handle.resourceKey);
     }
-    lifecycle.onBorrow(key, resource);
-    return new ResourceHandle(resourceKey, resource);
+    lifecycle.onBorrow(key, handle.resource);
+    return handle;
   }
 
-  /** Retrieves the next available cache entry key, creating it if necessary. */
-  ResourceKey<K> getResourceKey(K key) {
+  /** Retrieves the next available handler, creating the resource if necessary. */
+  ResourceHandle getResourceHandle(K key) {
     try {
-      TransferQueue<ResourceKey<K>> pool = transferQueues.getUnchecked(key);
+      TransferQueue<ResourceKey<K>> queue = transferQueues.getUnchecked(key);
       for (;;) {
-        ResourceKey<K> resourceKey = pool.poll(XFER_WAIT_TIME_MS, TimeUnit.MILLISECONDS);
-        if (resourceKey == null) {
-          return new ResourceKey<K>(pool, Status.IN_FLIGHT, key, generator.incrementAndGet());
-        }
-        Status status = resourceKey.getStatus();
-        if ((status == Status.IDLE) && resourceKey.goFromIdleToInFlight()) {
-          return resourceKey;
+        try {
+          ResourceKey<K> resourceKey = queue.poll(XFER_WAIT_TIME_MS, TimeUnit.MILLISECONDS);
+          if (resourceKey == null) {
+            long id = generator.incrementAndGet();
+            resourceKey = new ResourceKey<K>(queue, Status.IN_FLIGHT, key, id);
+            R resource = cache.getUnchecked(resourceKey);
+            return new ResourceHandle(resourceKey, resource);
+          }
+          R resource = cache.getUnchecked(resourceKey);
+          Status status = resourceKey.getStatus();
+          if ((status == Status.IDLE) && resourceKey.goFromIdleToInFlight()) {
+            return new ResourceHandle(resourceKey, resource);
+          }
+        } catch (UncheckedExecutionException e) {
+          if (!(e.getCause() instanceof AlreadyInitializedException)) {
+            // The resource associated with the key was discarded, but due to race conditions the
+            // key was handed out and the cache attempted to create a new instance. This exception
+            // was thrown to reject that operation and retry with a different key.
+            throw e;
+          }
         }
       }
     } catch (InterruptedException e) {
@@ -294,7 +309,6 @@ public final class MultiwayPool<K, R> {
               }
             } catch (InterruptedException e) {
               resourceKey.getQueue().add(resourceKey);
-              log.log(Level.FINEST, "", e);
             }
 
             resource = null;
@@ -402,7 +416,7 @@ public final class MultiwayPool<K, R> {
             }
             break;
           default:
-            // no-op
+            // do nothing
             return;
         }
       }
