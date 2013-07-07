@@ -189,34 +189,52 @@ public final class MultiwayPool<K, R> {
 
   /** Retrieves the next available handler, creating the resource if necessary. */
   ResourceHandle getResourceHandle(K key) {
-    try {
-      TransferQueue<ResourceKey<K>> queue = transferQueues.getUnchecked(key);
-      for (;;) {
-        try {
-          ResourceKey<K> resourceKey = queue.poll(XFER_WAIT_TIME_MS, TimeUnit.MILLISECONDS);
-          if (resourceKey == null) {
-            long id = generator.incrementAndGet();
-            resourceKey = new ResourceKey<K>(queue, Status.IN_FLIGHT, key, id);
-            R resource = cache.getUnchecked(resourceKey);
-            return new ResourceHandle(resourceKey, resource);
-          }
-          R resource = cache.getUnchecked(resourceKey);
-          Status status = resourceKey.getStatus();
-          if ((status == Status.IDLE) && resourceKey.goFromIdleToInFlight()) {
-            return new ResourceHandle(resourceKey, resource);
-          }
-        } catch (UncheckedExecutionException e) {
-          if (!(e.getCause() instanceof AlreadyInitializedException)) {
-            // The resource associated with the key was discarded, but due to race conditions the
-            // key was handed out and the cache attempted to create a new instance. This exception
-            // was thrown to reject that operation and retry with a different key.
-            throw e;
-          }
-        }
+    TransferQueue<ResourceKey<K>> queue = transferQueues.getUnchecked(key);
+    for (;;) {
+      ResourceHandle handle = tryToGetResourceHandle(key, queue);
+      if (handle != null) {
+        return handle;
       }
+    }
+  }
+
+  /** Attempts to retrieves the next available handler, creating the resource if necessary. */
+  @Nullable ResourceHandle tryToGetResourceHandle(K key, TransferQueue<ResourceKey<K>> queue) {
+    try {
+      ResourceKey<K> resourceKey = queue.poll(XFER_WAIT_TIME_MS, TimeUnit.MILLISECONDS);
+      return (resourceKey == null)
+          ? newResourceHandle(key, queue)
+          : tryToGetPooledResourceHandle(resourceKey);
     } catch (InterruptedException e) {
       throw Throwables.propagate(e);
     }
+  }
+
+  /** Creates a new resource associated to the category key and queue. */
+  ResourceHandle newResourceHandle(K key, TransferQueue<ResourceKey<K>> queue) {
+    long id = generator.incrementAndGet();
+    ResourceKey<K> resourceKey = new ResourceKey<K>(queue, Status.IN_FLIGHT, key, id);
+    R resource = cache.getUnchecked(resourceKey);
+    return new ResourceHandle(resourceKey, resource);
+  }
+
+  /** Attempts to get the pooled resource with the given key. */
+  @Nullable ResourceHandle tryToGetPooledResourceHandle(ResourceKey<K> resourceKey) {
+    try {
+      R resource = cache.getUnchecked(resourceKey);
+      Status status = resourceKey.getStatus();
+      if ((status == Status.IDLE) && resourceKey.goFromIdleToInFlight()) {
+        return new ResourceHandle(resourceKey, resource);
+      }
+    } catch (UncheckedExecutionException e) {
+      if (!(e.getCause() instanceof AlreadyInitializedException)) {
+        // The resource associated with the key was discarded, but due to race conditions the
+        // key was handed out and the cache attempted to create a new instance. This exception
+        // was thrown to reject that operation and retry with a different key.
+        throw e;
+      }
+    }
+    return null;
   }
 
   /** Returns the approximate number of resources managed by the pool. */
@@ -284,46 +302,56 @@ public final class MultiwayPool<K, R> {
         Status status = resourceKey.getStatus();
         switch (status) {
           case IN_FLIGHT:
-            if (!resourceKey.goFromInFlightToIdle()) {
-              break;
-            }
-
-            // Add the resource to the idle cache if present. If the resource was removed for any
-            // other reason while being added, it must then be discarded afterwards
-            if (idleCache.isPresent()) {
-              idleCache.get().put(resourceKey, resource);
-              if (resourceKey.getStatus() != Status.IDLE) {
-                idleCache.get().invalidate(resourceKey);
-              }
-            }
-
-            // Attempt to transfer the resource to another thread, else return it to the queue
-            try {
-              boolean transferred = resourceKey.getQueue().tryTransfer(
-                  resourceKey, XFER_WAIT_TIME_MS, TimeUnit.MILLISECONDS);
-              if (!transferred) {
-                resourceKey.getQueue().add(resourceKey);
-              }
-              if (resourceKey.getStatus() == Status.DEAD) {
-                resourceKey.removeFromTransferQueue();
-              }
-            } catch (InterruptedException e) {
-              resourceKey.getQueue().add(resourceKey);
-            }
-
-            resource = null;
-            return;
-          case RETIRED:
-            if (resourceKey.goFromRetiredToDead()) {
-              R old = resource;
-              resource = null;
-              lifecycle.onRemoval(resourceKey.getKey(), old);
+            if (resourceKey.goFromInFlightToIdle()) {
+              releaseToPool();
               return;
             }
+            break;
+          case RETIRED:
+            if (resourceKey.goFromRetiredToDead()) {
+              discardResource();
+              return;
+            }
+            break;
           default:
             throw new IllegalStateException("Unnexpected state: " + status);
         }
       }
+    }
+
+    /** Returns the resource to the pool so it can be borrowed by another caller. */
+    void releaseToPool() {
+      // Add the resource to the idle cache if present. If the resource was removed for any
+      // other reason while being added, it must then be discarded afterwards
+      if (idleCache.isPresent()) {
+        idleCache.get().put(resourceKey, resource);
+        if (resourceKey.getStatus() != Status.IDLE) {
+          idleCache.get().invalidate(resourceKey);
+        }
+      }
+
+      // Attempt to transfer the resource to another thread, else return it to the queue
+      try {
+        boolean transferred = resourceKey.getQueue().tryTransfer(
+            resourceKey, XFER_WAIT_TIME_MS, TimeUnit.MILLISECONDS);
+        if (!transferred) {
+          resourceKey.getQueue().add(resourceKey);
+        }
+        if (resourceKey.getStatus() == Status.DEAD) {
+          resourceKey.removeFromTransferQueue();
+        }
+      } catch (InterruptedException e) {
+        resourceKey.getQueue().add(resourceKey);
+      }
+
+      resource = null;
+    }
+
+    /** Discards the resource after it has been become dead. */
+    void discardResource() {
+      R old = resource;
+      resource = null;
+      lifecycle.onRemoval(resourceKey.getKey(), old);
     }
 
     @Override
@@ -363,11 +391,7 @@ public final class MultiwayPool<K, R> {
           case IDLE:
             // The resource is not being used and may be immediately discarded
             if (resourceKey.goFromIdleToDead()) {
-              resourceKey.removeFromTransferQueue();
-              if (idleCache.isPresent()) {
-                idleCache.get().invalidate(resourceKey);
-              }
-              lifecycle.onRemoval(resourceKey.getKey(), notification.getValue());
+              discardFromIdle(resourceKey, notification.getValue());
               return;
             }
             break;
@@ -380,8 +404,7 @@ public final class MultiwayPool<K, R> {
           case RETIRED:
             // A resource is already retired when it has been expired by the idle cache
             if (resourceKey.goFromRetiredToDead()) {
-              resourceKey.removeFromTransferQueue();
-              lifecycle.onRemoval(resourceKey.getKey(), notification.getValue());
+              discardFromRetired(resourceKey, notification.getValue());
               return;
             }
             break;
@@ -389,6 +412,21 @@ public final class MultiwayPool<K, R> {
             throw new IllegalStateException("Unnexpected state: " + status);
         }
       }
+    }
+
+    /** Discards the resource after becoming dead from the idle state. */
+    void discardFromIdle(ResourceKey<K> resourceKey, R resource) {
+      resourceKey.removeFromTransferQueue();
+      if (idleCache.isPresent()) {
+        idleCache.get().invalidate(resourceKey);
+      }
+      lifecycle.onRemoval(resourceKey.getKey(), resource);
+    }
+
+    /** Discards the resource after becoming dead from the retired state. */
+    void discardFromRetired(ResourceKey<K> resourceKey, R resource) {
+      resourceKey.removeFromTransferQueue();
+      lifecycle.onRemoval(resourceKey.getKey(), resource);
     }
   }
 
@@ -431,8 +469,8 @@ public final class MultiwayPool<K, R> {
    * Usage example:
    * <pre>   {@code
    *   MultiwayPool<File, RandomAccessFile> files = MultiwayPool.newBuilder()
-   *       .maximumSize(100)
    *       .expireAfterWrite(10, TimeUnit.MINUTES)
+   *       .maximumSize(100)
    *       .build(
    *           new ResourceLifecycle<File, RandomAccessFile>() {
    *             public RandomAccessFile create(File file) throws AnyException {

@@ -64,7 +64,7 @@ final class ResourceKey<K> {
     this.id = id;
   }
 
-  /** Retreives the resource category key. */
+  /** Retrieves the resource category key. */
   K getKey() {
     return key;
   }
