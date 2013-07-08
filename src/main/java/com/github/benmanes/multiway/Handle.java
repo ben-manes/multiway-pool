@@ -48,7 +48,7 @@ public interface Handle<R> extends Supplier<R> {
   /**
    * Retrieves the resource protected by this handle.
    *
-   * @throws IllegalStateException if the handle was released
+   * @throws IllegalStateException if the handle was already released
    */
   @Override
   R get();
@@ -57,7 +57,7 @@ public interface Handle<R> extends Supplier<R> {
    * Returns the resource to the object pool. If the resource has been evicted by the pool, it
    * is immediately discarded. Otherwise the resource is available to be borrowed from the pool.
    *
-   * @throws IllegalStateException if the handle was released
+   * @throws IllegalStateException if the handle was already released
    */
   void release();
 
@@ -69,14 +69,14 @@ public interface Handle<R> extends Supplier<R> {
    *
    * @param timeout how long to wait for an exchange before giving up and releasing to the pool
    * @param unit a {@code TimeUnit} determining how to interpret the {@code duration} parameter
-   * @throws IllegalStateException if the handle was released
+   * @throws IllegalStateException if the handle was already released
    */
   void release(long timeout, TimeUnit unit);
 
   /**
    * Returns the resource to the object pool to be immediately discarded.
    *
-   * @throws IllegalStateException if the handle was released
+   * @throws IllegalStateException if the handle was already released
    */
   void invalidate();
 }

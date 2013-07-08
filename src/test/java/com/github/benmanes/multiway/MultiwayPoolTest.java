@@ -29,6 +29,7 @@ import java.util.concurrent.locks.LockSupport;
 import com.github.benmanes.multiway.MultiwayPool.ResourceHandle;
 import com.github.benmanes.multiway.ResourceKey.Status;
 import com.google.common.base.Stopwatch;
+import com.google.common.cache.Weigher;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Queues;
 import com.google.common.testing.FakeTicker;
@@ -144,12 +145,15 @@ public final class MultiwayPoolTest {
 
   @Test
   public void evict_whenInFlight() {
-    getAndRelease(KEY_1);
+    Handle<?> handle = multiway.borrow(KEY_1);
     ResourceKey<?> resourceKey = getResourceKey();
-    assertThat(resourceKey.getStatus(), is(Status.IDLE));
+    assertThat(resourceKey.getStatus(), is(Status.IN_FLIGHT));
 
     multiway.cache.invalidateAll();
     assertThat(multiway.size(), is(0L));
+    assertThat(resourceKey.getStatus(), is(Status.RETIRED));
+
+    handle.release();
     assertThat(resourceKey.getStatus(), is(Status.DEAD));
   }
 
@@ -197,6 +201,26 @@ public final class MultiwayPoolTest {
     assertThat(lifecycle.borrows(), is(100));
     assertThat(lifecycle.releases(), is(100));
     assertThat(lifecycle.removals(), is(90));
+  }
+
+  @Test
+  public void evict_maximumWeight() {
+    multiway = MultiwayPool.newBuilder().maximumWeight(10).weigher(new Weigher<Object, UUID>() {
+      @Override public int weigh(Object key, UUID resource) {
+        return 5;
+      }
+    }).build(lifecycle);
+    List<Handle<?>> handles = Lists.newArrayList();
+    for (int i = 0; i < 100; i++) {
+      handles.add(multiway.borrow(KEY_1));
+    }
+    for (Handle<?> handle : handles) {
+      handle.release();
+    }
+    assertThat(multiway.size(), is(2L));
+    assertThat(lifecycle.borrows(), is(100));
+    assertThat(lifecycle.releases(), is(100));
+    assertThat(lifecycle.removals(), is(98));
   }
 
   @Test

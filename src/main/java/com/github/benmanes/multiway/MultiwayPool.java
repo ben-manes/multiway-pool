@@ -37,6 +37,7 @@ import com.google.common.cache.LoadingCache;
 import com.google.common.cache.RemovalCause;
 import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
+import com.google.common.cache.Weigher;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -100,7 +101,7 @@ public final class MultiwayPool<K, R> {
   final ResourceLifecycle<K, R> lifecycle;
   final AtomicLong generator;
 
-  MultiwayPool(Builder builder, ResourceLifecycle<K, R> lifecycle) {
+  MultiwayPool(Builder<? super K, ? super R> builder, ResourceLifecycle<K, R> lifecycle) {
     this.transferQueues = makeTransferQueues();
     this.idleCache = makeIdleCache(builder);
     this.generator = new AtomicLong();
@@ -109,8 +110,8 @@ public final class MultiwayPool<K, R> {
   }
 
   /** Constructs a new builder with no automatic eviction of any kind. */
-  public static Builder newBuilder() {
-    return new Builder();
+  public static Builder<Object, Object> newBuilder() {
+    return new Builder<Object, Object>();
   }
 
   /** Creates a mapping from the resource category to its transfer queue of available keys. */
@@ -124,10 +125,16 @@ public final class MultiwayPool<K, R> {
   }
 
   /** Creates a cache of resources based on a unique, per-instance key. */
-  LoadingCache<ResourceKey<K>, R> makeCache(Builder builder) {
+  LoadingCache<ResourceKey<K>, R> makeCache(Builder<? super K, ? super R> builder) {
     CacheBuilder<Object, Object> cacheBuilder = CacheBuilder.newBuilder();
     if (builder.maximumSize != Builder.UNSET_INT) {
       cacheBuilder.maximumSize(builder.maximumSize);
+    }
+    if (builder.maximumWeight != Builder.UNSET_INT) {
+      cacheBuilder.maximumWeight(builder.maximumWeight);
+    }
+    if (builder.weigher != null) {
+      cacheBuilder.weigher(builder.weigher);
     }
     if (builder.expireAfterWriteNanos != Builder.UNSET_INT) {
       cacheBuilder.expireAfterWrite(builder.expireAfterWriteNanos, TimeUnit.NANOSECONDS);
@@ -153,7 +160,7 @@ public final class MultiwayPool<K, R> {
   }
 
   /** Creates a cache of the idle resources eligible for expiration. */
-  Optional<Cache<ResourceKey<K>, R>> makeIdleCache(Builder builder) {
+  Optional<Cache<ResourceKey<K>, R>> makeIdleCache(Builder<? super K, ? super R> builder) {
     if (builder.expireAfterAccessNanos == -1) {
       return Optional.absent();
     }
@@ -502,12 +509,16 @@ public final class MultiwayPool<K, R> {
    *           });
    * }</pre>
    */
-  public static final class Builder {
+  public static final class Builder<K, R> {
     static final int UNSET_INT = -1;
 
-    Ticker ticker;
     boolean recordStats;
+
     long maximumSize = UNSET_INT;
+    long maximumWeight = UNSET_INT;
+    Weigher<? super K, ? super R> weigher;
+
+    Ticker ticker;
     long expireAfterWriteNanos = UNSET_INT;
     long expireAfterAccessNanos = UNSET_INT;
 
@@ -520,11 +531,68 @@ public final class MultiwayPool<K, R> {
      * @param size the maximum size of the cache
      * @throws IllegalArgumentException if {@code size} is negative
      */
-    public Builder maximumSize(long size) {
+    public Builder<K, R> maximumSize(long size) {
       checkState(maximumSize == UNSET_INT, "maximum size was already set to %s", maximumSize);
       checkArgument(size >= 0, "maximum size must not be negative");
       maximumSize = size;
       return this;
+    }
+
+    /**
+     * Specifies the maximum weight of resources the pool may contain, regardless of the category
+     * it is associated with. Weight is determined using the {@link Weigher} specified with
+     * {@link #weigher}, and use of this method requires a corresponding call to {@link #weigher}
+     * prior to calling {@link #build}.
+     * <p>
+     * Note that the cache <b>may evict a resource before this limit is exceeded</b>. As the pool
+     * size grows close to the maximum, the pool evicts entries that are less likely to be used
+     * again.
+     * <p>
+     * When {@code weight} is zero, resources will be evicted immediately after being loaded into
+     * pool. This can be useful in testing, or to disable the pool temporarily without a code
+     * change.
+     * <p>
+     * Note that weight is only used to determine whether the pool is over capacity; it has no
+     * effect on selecting which resource should be evicted next.
+     * <p>
+     * This feature cannot be used in conjunction with {@link #maximumSize}.
+     *
+     * @param weight the maximum total weight of entries the cache may contain
+     * @throws IllegalArgumentException if {@code weight} is negative
+     * @throws IllegalStateException if a maximum weight or size was already set
+     */
+    public Builder<K, R> maximumWeight(long weight) {
+      checkState(maximumWeight == UNSET_INT, "maximum weight was already set to %s", maximumWeight);
+      checkState(maximumSize == UNSET_INT, "maximum size was already set to %s", maximumSize);
+      checkArgument(weight >= 0, "maximum weight must not be negative");
+      this.maximumWeight = weight;
+      return this;
+    }
+
+    /**
+     * Specifies the weigher to use in determining the weight of resources. The weight is taken
+     * into consideration by {@link #maximumWeight(long)} when determining which resources to evict,
+     * and use of this method requires a corresponding call to {@link #maximumWeight(long)} prior to
+     * calling {@link #build}. Weights are measured and recorded when resources are inserted into
+     * the pool, and are thus effectively static during the lifetime of the resource.
+     *
+     * <p>When the weight of a resource is zero it will not be considered for size-based eviction
+     * (though it still may be evicted by other means).
+     *
+     * @param weigher the weigher to use in calculating the weight of cache entries
+     * @throws IllegalArgumentException if {@code size} is negative
+     * @throws IllegalStateException if a maximum size was already set
+     */
+    public <K1 extends K, R1 extends R> Builder<K1, R1> weigher(
+        Weigher<? super K1, ? super R1> weigher) {
+      checkState(this.weigher == null);
+      checkState(this.maximumSize == UNSET_INT, "weigher can not be combined with maximum size");
+
+      // safely limiting the kinds of caches this can produce
+      @SuppressWarnings("unchecked")
+      Builder<K1, R1> self = (Builder<K1, R1>) this;
+      self.weigher = checkNotNull(weigher);
+      return self;
     }
 
     /**
@@ -537,7 +605,7 @@ public final class MultiwayPool<K, R> {
      * @throws IllegalArgumentException if {@code duration} is negative
      * @throws IllegalStateException if the time to live or time to idle was already set
      */
-    public Builder expireAfterWrite(long duration, TimeUnit unit) {
+    public Builder<K, R> expireAfterWrite(long duration, TimeUnit unit) {
       checkState(expireAfterWriteNanos == UNSET_INT,
           "expireAfterWrite was already set to %s ns", expireAfterWriteNanos);
       checkArgument(duration >= 0, "duration cannot be negative: %s %s", duration, unit);
@@ -556,7 +624,7 @@ public final class MultiwayPool<K, R> {
      * @param unit the unit that {@code duration} is expressed in
      * @throws IllegalArgumentException if {@code duration} is negative
      */
-    public Builder expireAfterAccess(long duration, TimeUnit unit) {
+    public Builder<K, R> expireAfterAccess(long duration, TimeUnit unit) {
       checkState(expireAfterAccessNanos == UNSET_INT,
           "expireAfterAccess was already set to %s ns", expireAfterAccessNanos);
       checkArgument(duration >= 0, "duration cannot be negative: %s %s", duration, unit);
@@ -573,7 +641,7 @@ public final class MultiwayPool<K, R> {
      *
      * @throws IllegalStateException if a ticker was already set
      */
-    public Builder ticker(Ticker ticker) {
+    public Builder<K, R> ticker(Ticker ticker) {
       checkState(this.ticker == null);
       this.ticker = checkNotNull(ticker);
       return this;
@@ -585,7 +653,7 @@ public final class MultiwayPool<K, R> {
      * bookkeeping to be performed with each operation, and thus imposes a performance penalty on
      * cache operation.
      */
-    public Builder recordStats() {
+    public Builder<K, R> recordStats() {
       recordStats = true;
       return this;
     }
@@ -597,9 +665,10 @@ public final class MultiwayPool<K, R> {
      * @param lifecycle the resource life cycle used for creation and listener callbacks
      * @return a multiway pool having the requested features
      */
-    public <K, R> MultiwayPool<K, R> build(ResourceLifecycle<K, R> lifecycle) {
+    public <K1 extends K, R1 extends R> MultiwayPool<K1, R1> build(
+        ResourceLifecycle<K1, R1> lifecycle) {
       checkNotNull(lifecycle);
-      return new MultiwayPool<K, R>(this, lifecycle);
+      return new MultiwayPool<K1, R1>(this, lifecycle);
     }
   }
 }
