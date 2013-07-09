@@ -356,6 +356,14 @@ public final class MultiwayPoolTest {
   }
 
   @Test
+  public void tryWithResources() {
+    try (Handle<UUID> handle = multiway.borrow(KEY_1)) {
+      assertThat(getResourceKey().getStatus(), is(Status.IN_FLIGHT));
+    }
+    assertThat(getResourceKey().getStatus(), is(Status.IDLE));
+  }
+
+  @Test
   public void discardPool() {
     Handle<UUID> handle = multiway.borrow(KEY_1);
     GcFinalization.awaitFullGc();

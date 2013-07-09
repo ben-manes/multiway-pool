@@ -294,6 +294,11 @@ public final class MultiwayPool<K, R> {
     }
 
     @Override
+    public void close() {
+      release();
+    }
+
+    @Override
     public void release() {
       release(0L, TimeUnit.NANOSECONDS);
     }

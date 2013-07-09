@@ -43,7 +43,7 @@ import com.google.common.base.Supplier;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @NotThreadSafe
-public interface Handle<R> extends Supplier<R> {
+public interface Handle<R> extends Supplier<R>, AutoCloseable {
 
   /**
    * Retrieves the resource protected by this handle.
@@ -79,4 +79,11 @@ public interface Handle<R> extends Supplier<R> {
    * @throws IllegalStateException if the handle was already released
    */
   void invalidate();
+
+  /**
+   * An alias for {@link #release()} that is invoked automatically in a try-with-resources
+   * statement.
+   */
+  @Override
+  void close();
 }
