@@ -137,6 +137,7 @@ final class ResourceKey<K> {
   @Override
   public String toString() {
     return Objects.toStringHelper(this)
+        .add("id", System.identityHashCode(this))
         .add("status", status)
         .add("key", key)
         .toString();

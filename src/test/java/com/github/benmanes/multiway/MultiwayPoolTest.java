@@ -63,20 +63,27 @@ public final class MultiwayPoolTest {
 
   @Test
   public void borrow_concurrent() throws Exception {
-    ConcurrentTestHarness.timeTasks(10, new Runnable() {
+    final int numThreads = 10;
+    final int iterations = 100;
+
+    ConcurrentTestHarness.timeTasks(numThreads, new Runnable() {
       @Override public void run() {
-        for (int i = 0; i < 100; i++) {
-          Handle<UUID> handle = multiway.borrow(KEY_1, 1, TimeUnit.MILLISECONDS);
+        for (int i = 0; i < iterations; i++) {
+          Handle<UUID> handle = multiway.borrow(KEY_1);
+          yield();
           handle.release();
+          yield();
         }
       }
     });
-    long size = multiway.cache.size();
-    assertThat(lifecycle.borrows(), is(1000));
-    assertThat(lifecycle.releases(), is(1000));
-    assertThat(multiway.cache.size(), is(size));
-    assertThat(multiway.cache.size(), lessThanOrEqualTo(10L));
-    assertThat(multiway.transferQueues.get(KEY_1).size(), is((int) size));
+    multiway.cleanUp();
+    int cycles = numThreads * iterations;
+    int size = (int) multiway.cache.size();
+
+    assertThat(lifecycle.created(), is(size));
+    assertThat(lifecycle.borrows(), is(cycles));
+    assertThat(lifecycle.releases(), is(cycles));
+    assertThat(multiway.transferQueues.get(KEY_1).size(), is(size));
   }
 
   @Test
@@ -395,11 +402,6 @@ public final class MultiwayPoolTest {
           handle.release();
         }
       }
-
-      void yield() {
-        Thread.yield();
-        LockSupport.parkNanos(1L);
-      }
     });
     multiway.cleanUp();
 
@@ -424,6 +426,11 @@ public final class MultiwayPoolTest {
 
   private ResourceKey<Object> getResourceKey() {
     return multiway.cache.asMap().keySet().iterator().next();
+  }
+
+  private void yield() {
+    Thread.yield();
+    LockSupport.parkNanos(1L);
   }
 
   private static final class TestResourceLifecycle extends ResourceLifecycle<Object, UUID> {

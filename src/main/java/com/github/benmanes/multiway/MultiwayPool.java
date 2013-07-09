@@ -25,6 +25,7 @@ import javax.annotation.concurrent.ThreadSafe;
 
 import com.github.benmanes.multiway.ResourceKey.AlreadyInitializedException;
 import com.github.benmanes.multiway.ResourceKey.Status;
+import com.google.common.base.Objects;
 import com.google.common.base.Optional;
 import com.google.common.base.Throwables;
 import com.google.common.base.Ticker;
@@ -244,10 +245,9 @@ public final class MultiwayPool<K, R> {
     try {
       R resource = cache.getUnchecked(resourceKey);
       Status status = resourceKey.getStatus();
-      if ((status == Status.IDLE) && resourceKey.goFromIdleToInFlight()) {
-        return new ResourceHandle(resourceKey, resource);
-      }
-      return null;
+      return (status == Status.IDLE) && resourceKey.goFromIdleToInFlight()
+          ? new ResourceHandle(resourceKey, resource)
+          : null;
     } catch (UncheckedExecutionException e) {
       if (e.getCause() instanceof AlreadyInitializedException) {
         // The resource associated with the key was discarded, but due to race conditions the
@@ -358,16 +358,19 @@ public final class MultiwayPool<K, R> {
       }
 
       // Attempt to transfer the resource to another thread, else return it to the queue
+      TransferQueue<ResourceKey<K>> queue = resourceKey.getQueue();
       try {
-        boolean transferred = resourceKey.getQueue().tryTransfer(resourceKey, timeout, unit);
+        boolean transferred = (timeout == 0)
+            ? queue.tryTransfer(resourceKey)
+            : queue.tryTransfer(resourceKey, timeout, unit);
         if (!transferred) {
-          resourceKey.getQueue().add(resourceKey);
-        }
-        if (resourceKey.getStatus() == Status.DEAD) {
-          resourceKey.removeFromTransferQueue();
+          queue.add(resourceKey);
         }
       } catch (InterruptedException e) {
-        resourceKey.getQueue().add(resourceKey);
+        queue.add(resourceKey);
+      }
+      if (resourceKey.getStatus() == Status.DEAD) {
+        resourceKey.removeFromTransferQueue();
       }
 
       resource = null;
@@ -382,7 +385,11 @@ public final class MultiwayPool<K, R> {
 
     @Override
     public String toString() {
-      return String.valueOf(resourceKey);
+      return Objects.toStringHelper(this)
+          .add("status", resourceKey.getStatus())
+          .add("key", resourceKey.getKey())
+          .add("resource", resource)
+          .toString();
     }
 
     /**
