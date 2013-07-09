@@ -18,7 +18,6 @@ package com.github.benmanes.multiway;
 import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TransferQueue;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
 
 import javax.annotation.Nullable;
@@ -99,12 +98,10 @@ public final class MultiwayPool<K, R> {
   final Optional<Cache<ResourceKey<K>, R>> idleCache;
   final LoadingCache<ResourceKey<K>, R> cache;
   final ResourceLifecycle<K, R> lifecycle;
-  final AtomicLong generator;
 
   MultiwayPool(Builder<? super K, ? super R> builder, ResourceLifecycle<K, R> lifecycle) {
     this.transferQueues = makeTransferQueues();
     this.idleCache = makeIdleCache(builder);
-    this.generator = new AtomicLong();
     this.cache = makeCache(builder);
     this.lifecycle = lifecycle;
   }
@@ -237,8 +234,7 @@ public final class MultiwayPool<K, R> {
 
   /** Creates a new resource associated to the category key and queue. */
   ResourceHandle newResourceHandle(K key, TransferQueue<ResourceKey<K>> queue) {
-    long id = generator.incrementAndGet();
-    ResourceKey<K> resourceKey = new ResourceKey<K>(queue, Status.IN_FLIGHT, key, id);
+    ResourceKey<K> resourceKey = new ResourceKey<K>(queue, Status.IN_FLIGHT, key);
     R resource = cache.getUnchecked(resourceKey);
     return new ResourceHandle(resourceKey, resource);
   }

@@ -51,17 +51,15 @@ final class ResourceKey<K> {
   }
 
   final K key;
-  final long id;
   final AtomicBoolean initialized;
   final AtomicReference<Status> status;
   final TransferQueue<ResourceKey<K>> queue;
 
-  ResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key, long id) {
+  ResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key) {
     this.status = Atomics.newReference(status);
     this.initialized = new AtomicBoolean();
     this.queue = checkNotNull(queue);
     this.key = checkNotNull(key);
-    this.id = id;
   }
 
   /** Retrieves the resource category key. */
@@ -137,27 +135,10 @@ final class ResourceKey<K> {
   }
 
   @Override
-  public int hashCode() {
-    return Objects.hashCode(key, id);
-  }
-
-  @Override
-  public boolean equals(Object obj) {
-    if (this == obj) {
-      return true;
-    } else if (!(obj instanceof ResourceKey<?>)) {
-      return false;
-    }
-    ResourceKey<?> resourceKey = (ResourceKey<?>) obj;
-    return (id == resourceKey.id) && key.equals(resourceKey.key);
-  }
-
-  @Override
   public String toString() {
     return Objects.toStringHelper(this)
         .add("status", status)
         .add("key", key)
-        .add("id", id)
         .toString();
   }
 

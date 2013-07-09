@@ -40,7 +40,6 @@ import org.testng.annotations.Test;
 import static com.jayway.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.empty;
-import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
@@ -76,7 +75,6 @@ public final class MultiwayPoolTest {
     assertThat(lifecycle.borrows(), is(1000));
     assertThat(lifecycle.releases(), is(1000));
     assertThat(multiway.cache.size(), is(size));
-    assertThat(multiway.generator.get(), is(size));
     assertThat(multiway.cache.size(), lessThanOrEqualTo(10L));
     assertThat(multiway.transferQueues.get(KEY_1).size(), is((int) size));
   }
@@ -414,7 +412,6 @@ public final class MultiwayPoolTest {
     assertThat(queued, is(size));
     assertThat(size, lessThanOrEqualTo(maxSize));
     assertThat(lifecycle.releases(), is(lifecycle.borrows()));
-    assertThat(multiway.generator.get(), is(greaterThanOrEqualTo(size)));
     assertThat(lifecycle.created(), is((int) size + lifecycle.removals()));
   }
 
