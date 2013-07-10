@@ -27,8 +27,11 @@ import javax.annotation.concurrent.ThreadSafe;
 @ThreadSafe
 public abstract class ResourceLifecycle<K, R> {
 
-  /** Creates a resource corresponding to the {@code key}. */
-  public abstract R create(K key) throws Exception;
+  /**
+   * Notifies that a the resource was created. This is called by the thread creating the
+   * resource, prior to being given the instance.
+   */
+  public void onCreate(K key, R resource) {}
 
   /**
    * Notifies that a the resource was borrowed. This is called by the thread requesting the

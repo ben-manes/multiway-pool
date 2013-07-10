@@ -26,8 +26,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 
-import com.github.benmanes.multiway.MultiwayPool.ResourceHandle;
 import com.github.benmanes.multiway.ResourceKey.Status;
+import com.github.benmanes.multiway.TransferPool.LoadingTransferPool;
+import com.github.benmanes.multiway.TransferPool.ResourceHandle;
 import com.google.common.base.Stopwatch;
 import com.google.common.cache.Weigher;
 import com.google.common.collect.Lists;
@@ -52,13 +53,20 @@ public final class MultiwayPoolTest {
 
   private FakeTicker ticker;
   private TestResourceLifecycle lifecycle;
-  private MultiwayPool<Object, UUID> multiway;
+  private LoadingTransferPool<Object, UUID> multiway;
 
   @BeforeMethod
   public void beforeMethod() {
     ticker = new FakeTicker();
     lifecycle = new TestResourceLifecycle();
-    multiway = MultiwayPool.newBuilder().build(lifecycle);
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder());
+  }
+
+  @SuppressWarnings("unchecked")
+  LoadingTransferPool<Object, UUID> makeMultiwayPool(MultiwayPoolBuilder<?, ?> builder) {
+    MultiwayPoolBuilder<Object, Object> pools = (MultiwayPoolBuilder<Object, Object>) builder;
+    return (LoadingTransferPool<Object, UUID>) pools
+        .lifecycle(lifecycle).build(new TestResourceLoader());
   }
 
   @Test
@@ -128,7 +136,7 @@ public final class MultiwayPoolTest {
 
   @Test
   public void evict_immediately() {
-    multiway = MultiwayPool.newBuilder().maximumSize(0).build(lifecycle);
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder().maximumSize(0));
     UUID first = getAndRelease(KEY_1);
     UUID second = getAndRelease(KEY_1);
     assertThat(first, is(not(second)));
@@ -194,7 +202,7 @@ public final class MultiwayPoolTest {
 
   @Test
   public void evict_maximumSize() {
-    multiway = MultiwayPool.newBuilder().maximumSize(10).build(lifecycle);
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder().maximumSize(10));
     List<Handle<?>> handles = Lists.newArrayList();
     for (int i = 0; i < 100; i++) {
       handles.add(multiway.borrow(KEY_1));
@@ -210,11 +218,12 @@ public final class MultiwayPoolTest {
 
   @Test
   public void evict_maximumWeight() {
-    multiway = MultiwayPool.newBuilder().maximumWeight(10).weigher(new Weigher<Object, UUID>() {
-      @Override public int weigh(Object key, UUID resource) {
-        return 5;
-      }
-    }).build(lifecycle);
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder().maximumWeight(10)
+        .weigher(new Weigher<Object, UUID>() {
+          @Override public int weigh(Object key, UUID resource) {
+            return 5;
+          }
+        }));
     List<Handle<?>> handles = Lists.newArrayList();
     for (int i = 0; i < 100; i++) {
       handles.add(multiway.borrow(KEY_1));
@@ -230,9 +239,8 @@ public final class MultiwayPoolTest {
 
   @Test
   public void evict_expireAfterAccess() {
-    multiway = MultiwayPool.newBuilder().ticker(ticker)
-        .expireAfterAccess(1, TimeUnit.MINUTES)
-        .build(lifecycle);
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
+        .ticker(ticker).expireAfterAccess(1, TimeUnit.MINUTES));
     List<Handle<?>> handles = Lists.newArrayList();
     for (int i = 0; i < 100; i++) {
       handles.add(multiway.borrow(KEY_1));
@@ -251,9 +259,8 @@ public final class MultiwayPoolTest {
 
   @Test
   public void evict_expireAfterWrite() {
-    multiway = MultiwayPool.newBuilder().ticker(ticker)
-        .expireAfterWrite(1, TimeUnit.MINUTES)
-        .build(lifecycle);
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
+        .ticker(ticker).expireAfterWrite(1, TimeUnit.MINUTES));
     List<Handle<?>> handles = Lists.newArrayList();
     for (int i = 0; i < 100; i++) {
       handles.add(multiway.borrow(KEY_1));
@@ -381,11 +388,9 @@ public final class MultiwayPoolTest {
   @Test
   public void concurrent() throws Exception {
     long maxSize = 10;
-    multiway = MultiwayPool.newBuilder()
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
         .expireAfterAccess(100, TimeUnit.NANOSECONDS)
-        .maximumSize(maxSize)
-        .build(lifecycle);
-
+        .maximumSize(maxSize));
     ConcurrentTestHarness.timeTasks(10, new Runnable() {
       final ThreadLocalRandom random = ThreadLocalRandom.current();
 
@@ -441,6 +446,12 @@ public final class MultiwayPoolTest {
     LockSupport.parkNanos(1L);
   }
 
+  private static final class TestResourceLoader implements ResourceLoader<Object, UUID> {
+    @Override public UUID load(Object key) throws Exception {
+      return UUID.randomUUID();
+    }
+  }
+
   private static final class TestResourceLifecycle extends ResourceLifecycle<Object, UUID> {
     final AtomicInteger created = new AtomicInteger();
     final AtomicInteger borrows = new AtomicInteger();
@@ -448,9 +459,8 @@ public final class MultiwayPoolTest {
     final AtomicInteger removals = new AtomicInteger();
 
     @Override
-    public UUID create(Object key) throws Exception {
+    public void onCreate(Object key, UUID resource) {
       created.incrementAndGet();
-      return UUID.randomUUID();
     }
 
     @Override

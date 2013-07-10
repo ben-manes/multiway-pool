@@ -9,15 +9,17 @@ regards to [CASSANDRA-5661](https://issues.apache.org/jira/browse/CASSANDRA-5661
 A pool might manage the connections for databases, such as a master and multiple slaves.
 
 ```java
-MultiwayPool<String, Connection> pool = MultiwayPool.newBuilder()
+LoadingMultiwayPool<String, Connection> pool = MultiwayPoolBuilder.newBuilder()
     .maximumSize(50)
     .expireAfterAccess(10, TimeUnit.MINUTES)
-    .build(new ResourceLifecycle<String, Connection>() {
-      public Connection create(String databaseName) {
-        // create connection to database
-      }
+    .lifecycle(new ResourceLifecycle<String, Connection>() {
       public void onRemoval(String key, Connection connection) {
         connection.close();
+      }
+    })
+    .build(new ResourceLoader<String, Connection>() {
+      public Connection load(String databaseName) {
+        // create connection to database
       }
     });
 

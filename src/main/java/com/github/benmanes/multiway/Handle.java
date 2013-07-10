@@ -27,7 +27,7 @@ import com.google.common.base.Supplier;
  * shared across threads. The handle is not implicitly bounded to support nested scopes, e.g. a
  * subsequent call to retrieve a handle will return a new resource even if a handle for that
  * resource type is available at a higher scope. Support for scopes, such as used by database
- * transactions, may be added by a decorator to the {@link MultiwayPool}.
+ * transactions, may be added by a decorator to the {@link TransferPool}.
  * <p>
  * In most cases, the following idiom should be used:
  * <pre>   {@code
