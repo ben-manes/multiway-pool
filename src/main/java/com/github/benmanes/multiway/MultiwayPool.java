@@ -68,6 +68,21 @@ public interface MultiwayPool<K, R> {
    */
   Handle<R> borrow(K key, Callable<? extends R> loader, long timeout, TimeUnit unit);
 
+  /**
+   * Discards any pooled resource associated with the {@code key}. Any resource currently in use
+   * will be immediately discarded upon release.
+   */
+  void invalidate(Object key);
+
+  /**
+   * Discards all resources in the pool. Any resource currently in use will be immediately
+   * discarded upon release.
+   */
+  void invalidateAll();
+
+  /** Returns the approximate number of resources managed by the pool. */
+  long size();
+
   /** Performs any pending maintenance operations needed by the pool. */
   void cleanUp();
 

@@ -15,6 +15,7 @@
  */
 package com.github.benmanes.multiway;
 
+import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedTransferQueue;
@@ -37,6 +38,7 @@ import com.google.common.cache.LoadingCache;
 import com.google.common.cache.RemovalCause;
 import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
+import com.google.common.collect.Lists;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
@@ -223,8 +225,26 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
         : null;
   }
 
-  /** Returns the approximate number of resources managed by the pool. */
-  long size() {
+  @Override
+  public void invalidate(Object key) {
+    checkNotNull(key);
+
+    List<ResourceKey<K>> resourceKeys = Lists.newArrayList();
+    for (ResourceKey<K> resourceKey : cache.asMap().keySet()) {
+      if (resourceKey.getKey().equals(key)) {
+        resourceKeys.add(resourceKey);
+      }
+    }
+    cache.invalidateAll(resourceKeys);
+  }
+
+  @Override
+  public void invalidateAll() {
+    cache.invalidateAll();
+  }
+
+  @Override
+  public long size() {
     return cache.size();
   }
 

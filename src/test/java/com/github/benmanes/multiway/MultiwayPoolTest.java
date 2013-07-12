@@ -86,7 +86,7 @@ public final class MultiwayPoolTest {
     });
     multiway.cleanUp();
     int cycles = numThreads * iterations;
-    int size = (int) multiway.cache.size();
+    int size = (int) multiway.size();
 
     assertThat(lifecycle.created(), is(size));
     assertThat(lifecycle.borrows(), is(cycles));
@@ -151,7 +151,7 @@ public final class MultiwayPoolTest {
     ResourceKey<?> resourceKey = getResourceKey();
     assertThat(resourceKey.getStatus(), is(Status.IDLE));
 
-    multiway.cache.invalidateAll();
+    multiway.invalidateAll();
     assertThat(multiway.size(), is(0L));
     assertThat(resourceKey.getStatus(), is(Status.DEAD));
   }
@@ -162,7 +162,7 @@ public final class MultiwayPoolTest {
     ResourceKey<?> resourceKey = getResourceKey();
     assertThat(resourceKey.getStatus(), is(Status.IN_FLIGHT));
 
-    multiway.cache.invalidateAll();
+    multiway.invalidateAll();
     assertThat(multiway.size(), is(0L));
     assertThat(resourceKey.getStatus(), is(Status.RETIRED));
 
@@ -178,7 +178,7 @@ public final class MultiwayPoolTest {
     // Simulate transition due to idle cache expiration
     resourceKey.goFromIdleToRetired();
 
-    multiway.cache.invalidateAll();
+    multiway.invalidateAll();
     assertThat(multiway.size(), is(0L));
     assertThat(lifecycle.borrows(), is(1));
     assertThat(lifecycle.releases(), is(1));
@@ -193,7 +193,7 @@ public final class MultiwayPoolTest {
     }
     assertThat(multiway.size(), is(10L));
 
-    multiway.cache.invalidateAll();
+    multiway.invalidateAll();
     assertThat(multiway.size(), is(0L));
     assertThat(lifecycle.borrows(), is(10));
     assertThat(lifecycle.releases(), is(10));
@@ -299,7 +299,7 @@ public final class MultiwayPoolTest {
     @SuppressWarnings("rawtypes")
     ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);
 
-    multiway.cache.invalidateAll();
+    multiway.invalidateAll();
     assertThat(multiway.size(), is(0L));
     assertThat(lifecycle.borrows(), is(1));
     assertThat(lifecycle.releases(), is(0));
@@ -316,7 +316,7 @@ public final class MultiwayPoolTest {
   public void release_finalize() {
     multiway.borrow(KEY_1);
     GcFinalization.awaitFullGc();
-    multiway.cache.cleanUp();
+    multiway.cleanUp();
     await().until(new Callable<Boolean>() {
       @Override public Boolean call() throws Exception {
         return !multiway.transferQueues.getUnchecked(KEY_1).isEmpty();
@@ -347,7 +347,7 @@ public final class MultiwayPoolTest {
   public void invalidate_whenRetired() {
     @SuppressWarnings("rawtypes")
     ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);
-    multiway.cache.invalidateAll();
+    multiway.invalidateAll();
 
     assertThat(multiway.size(), is(0L));
     assertThat(lifecycle.borrows(), is(1));
@@ -378,11 +378,29 @@ public final class MultiwayPoolTest {
 
     handle.release();
     handle = null;
-    multiway.cache.invalidateAll();
+    multiway.invalidateAll();
 
     GcFinalization.awaitFullGc();
     multiway.transferQueues.cleanUp();
     assertThat(multiway.transferQueues.size(), is(0L));
+  }
+
+  @Test
+  public void invalidate() {
+    for (int i = 0; i < 10; i++) {
+      multiway.borrow(i);
+    }
+    multiway.invalidate(5);
+    assertThat(multiway.size(), is(9L));
+  }
+
+  @Test
+  public void invalidateAll() {
+    for (int i = 0; i < 10; i++) {
+      multiway.borrow(i);
+    }
+    multiway.invalidateAll();
+    assertThat(multiway.size(), is(0L));
   }
 
   @Test
@@ -419,7 +437,7 @@ public final class MultiwayPoolTest {
     multiway.cleanUp();
 
     long queued = 0;
-    long size = multiway.cache.size();
+    long size = multiway.size();
     for (Queue<?> queue : multiway.transferQueues.asMap().values()) {
       queued += queue.size();
     }
