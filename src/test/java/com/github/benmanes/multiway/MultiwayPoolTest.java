@@ -66,7 +66,7 @@ public final class MultiwayPoolTest {
   LoadingTransferPool<Object, UUID> makeMultiwayPool(MultiwayPoolBuilder<?, ?> builder) {
     MultiwayPoolBuilder<Object, Object> pools = (MultiwayPoolBuilder<Object, Object>) builder;
     return (LoadingTransferPool<Object, UUID>) pools
-        .lifecycle(lifecycle).build(new TestResourceLoader());
+        .lifecycle(lifecycle).recordStats().build(new TestResourceLoader());
   }
 
   @Test
@@ -119,7 +119,7 @@ public final class MultiwayPoolTest {
     new Thread() {
       @Override public void run() {
         start.set(true);
-        Handle<UUID> handle = multiway.borrow(KEY_1);
+        Handle<UUID> handle = multiway.borrow(KEY_1, 1, TimeUnit.NANOSECONDS);
         handle.release(1, TimeUnit.MINUTES);
         done.set(true);
       }
@@ -132,6 +132,18 @@ public final class MultiwayPoolTest {
     handle.release();
 
     assertThat(stopwatch.elapsed(TimeUnit.MINUTES), is(0L));
+  }
+
+  @Test
+  public void borrow_callable() {
+    final UUID expected = UUID.randomUUID();
+    Handle<UUID> handle = multiway.borrow(KEY_1, new Callable<UUID>() {
+      @Override public UUID call() throws Exception {
+        return expected;
+      }
+    });
+    assertThat(handle.get(), is(expected));
+    handle.release();
   }
 
   @Test
@@ -291,7 +303,7 @@ public final class MultiwayPoolTest {
     assertThat(multiway.size(), is(1L));
     assertThat(lifecycle.releases(), is(1));
     assertThat(lifecycle.removals(), is(0));
-    assertThat(handle.resourceKey.getStatus(), is(Status.IDLE));
+    assertThat(handle.toString(), handle.resourceKey.getStatus(), is(Status.IDLE));
   }
 
   @Test
@@ -323,7 +335,7 @@ public final class MultiwayPoolTest {
       }
     });
     ResourceKey<?> resourceKey = getResourceKey();
-    assertThat(resourceKey.getStatus(), is(Status.IDLE));
+    assertThat(resourceKey.toString(), resourceKey.getStatus(), is(Status.IDLE));
   }
 
   @Test
@@ -401,6 +413,14 @@ public final class MultiwayPoolTest {
     }
     multiway.invalidateAll();
     assertThat(multiway.size(), is(0L));
+  }
+
+  @Test
+  public void stats() {
+    getAndRelease(KEY_1);
+    getAndRelease(KEY_1);
+    assertThat(multiway.stats().hitCount(), is(1L));
+    assertThat(multiway.stats().loadSuccessCount(), is(1L));
   }
 
   @Test
