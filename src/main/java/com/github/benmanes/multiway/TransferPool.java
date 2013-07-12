@@ -26,16 +26,19 @@ import java.util.logging.Logger;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
+import com.github.benmanes.multiway.ResourceKey.LinkedResourceKey;
 import com.github.benmanes.multiway.ResourceKey.Status;
+import com.github.benmanes.multiway.ResourceKey.UnlinkedResourceKey;
+import com.github.benmanes.multiway.TimeToIdlePolicy.EvictionListener;
 import com.google.common.base.Objects;
 import com.google.common.base.Optional;
 import com.google.common.base.Throwables;
+import com.google.common.base.Ticker;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.CacheStats;
 import com.google.common.cache.LoadingCache;
-import com.google.common.cache.RemovalCause;
 import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
 import com.google.common.collect.Lists;
@@ -64,12 +67,10 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
    * thread returning a resource to the pool will first attempting to exchange it with a thread
    * checking one out, falling back to storing it in the queue if a transfer is unsuccessful.
    *
-   * The time-to-idle policy is implemented as an optional secondary cache. This is required in
-   * order to count idle time as the duration when the resource is not being used, rather than the
-   * duration that the resource has resided in the primary cache not being accessed. This secondary
-   * cache is implemented naively, and therefore is more expensive to maintain. For efficiency, this
-   * feature may need to be rewritten to use the lock amortization or similar techniques in the
-   * future.
+   * The time-to-idle policy is implemented as the duration when the resource is not being used,
+   * rather than the duration that the resource has resided in the primary cache not being accessed.
+   * This policy is implemented as a queue ordered by access time, where the head is the resource
+   * that has remained idle in the pool the longest.
    *
    * The removal of unused queues is performed aggressively by using weak references. The resource's
    * cache key retains a strong reference to its queue, thereby retaining the pool while there are
@@ -81,12 +82,12 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
 
   final LoadingCache<K, TransferQueue<ResourceKey<K>>> transferQueues;
   final ResourceLifecycle<? super K, ? super R> lifecycle;
-  final Optional<Cache<ResourceKey<K>, R>> idleCache;
+  final Optional<TimeToIdlePolicy<K, R>> timeToIdlePolicy;
   final Cache<ResourceKey<K>, R> cache;
 
   TransferPool(MultiwayPoolBuilder<? super K, ? super R> builder) {
+    this.timeToIdlePolicy = makeTimeToIdlePolicy(builder);
     this.transferQueues = makeTransferQueues();
-    this.idleCache = makeIdleCache(builder);
     this.lifecycle = builder.lifecycle;
     this.cache = makeCache(builder);
   }
@@ -126,20 +127,15 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   }
 
   /** Creates a cache of the idle resources eligible for expiration. */
-  Optional<Cache<ResourceKey<K>, R>> makeIdleCache(
+  Optional<TimeToIdlePolicy<K, R>> makeTimeToIdlePolicy(
       MultiwayPoolBuilder<? super K, ? super R> builder) {
     if (builder.expireAfterAccessNanos == -1) {
       return Optional.absent();
     }
-    CacheBuilder<Object, Object> cacheBuilder = CacheBuilder.newBuilder();
-    if (builder.ticker != null) {
-      cacheBuilder.ticker(builder.ticker);
-    }
-    Cache<ResourceKey<K>, R> idle = cacheBuilder
-        .expireAfterAccess(builder.expireAfterAccessNanos, TimeUnit.NANOSECONDS)
-        .removalListener(new IdleCacheRemovalListener())
-        .build();
-    return Optional.of(idle);
+    Ticker ticker = (builder.ticker == null) ? Ticker.systemTicker() : builder.ticker;
+    TimeToIdlePolicy<K, R> policy = new TimeToIdlePolicy<K, R>(
+        builder.expireAfterAccessNanos, ticker, new IdleEvictionListener());
+    return Optional.of(policy);
   }
 
   @Override
@@ -154,8 +150,8 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     checkNotNull(loader);
 
     ResourceHandle handle = getResourceHandle(key, loader, timeout, unit);
-    if (idleCache.isPresent()) {
-      idleCache.get().invalidate(handle.resourceKey);
+    if (timeToIdlePolicy.isPresent()) {
+      timeToIdlePolicy.get().invalidate(handle.resourceKey);
     }
     lifecycle.onBorrow(key, handle.resource);
     return handle;
@@ -185,9 +181,16 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       ResourceKey<K> resourceKey = (timeoutNanos == 0)
           ? queue.poll()
           : queue.poll(timeoutNanos, TimeUnit.NANOSECONDS);
-      return (resourceKey == null)
-          ? newResourceHandle(key, loader, queue)
-          : tryToGetPooledResourceHandle(resourceKey);
+
+      if (resourceKey == null) {
+        return newResourceHandle(key, loader, queue);
+      }
+      if (timeToIdlePolicy.isPresent() && timeToIdlePolicy.get().hasExpired(resourceKey)) {
+        // Retry with another resource due to idle expiration
+        timeToIdlePolicy.get().cleanUp();
+        return null;
+      }
+      return tryToGetPooledResourceHandle(resourceKey);
     } catch (InterruptedException e) {
       throw Throwables.propagate(e);
     }
@@ -197,13 +200,12 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   ResourceHandle newResourceHandle(K key, final Callable<? extends R> loader,
       TransferQueue<ResourceKey<K>> queue) {
     try {
-      final ResourceKey<K> resourceKey = new ResourceKey<K>(queue, Status.IN_FLIGHT, key);
+      final ResourceKey<K> resourceKey = timeToIdlePolicy.isPresent()
+          ? new LinkedResourceKey<K>(queue, Status.IN_FLIGHT, key)
+          : new UnlinkedResourceKey<K>(queue, Status.IN_FLIGHT, key);
       R resource = cache.get(resourceKey, new Callable<R>() {
         @Override public R call() throws Exception {
           R resource = loader.call();
-          if (idleCache.isPresent()) {
-            idleCache.get().put(resourceKey, resource);
-          }
           lifecycle.onCreate(resourceKey.getKey(), resource);
           return resource;
         }
@@ -250,8 +252,8 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
 
   @Override
   public void cleanUp() {
-    if (idleCache.isPresent()) {
-      idleCache.get().cleanUp();
+    if (timeToIdlePolicy.isPresent()) {
+      timeToIdlePolicy.get().cleanUp();
     }
     cache.cleanUp();
   }
@@ -365,10 +367,10 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     void releaseToPool(long timeout, TimeUnit unit) {
       // Add the resource to the idle cache if present. If the resource was removed for any
       // other reason while being added, it must then be discarded afterwards
-      if (idleCache.isPresent()) {
-        idleCache.get().put(resourceKey, resource);
+      if (timeToIdlePolicy.isPresent()) {
+        timeToIdlePolicy.get().add(resourceKey);
         if (resourceKey.getStatus() != Status.IDLE) {
-          idleCache.get().invalidate(resourceKey);
+          timeToIdlePolicy.get().invalidate(resourceKey);
         }
       }
 
@@ -465,8 +467,8 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     /** Discards the resource after becoming dead from the idle state. */
     void discardFromIdle(ResourceKey<K> resourceKey, R resource) {
       resourceKey.removeFromTransferQueue();
-      if (idleCache.isPresent()) {
-        idleCache.get().invalidate(resourceKey);
+      if (timeToIdlePolicy.isPresent()) {
+        timeToIdlePolicy.get().invalidate(resourceKey);
       }
       lifecycle.onRemoval(resourceKey.getKey(), resource);
     }
@@ -478,20 +480,15 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     }
   }
 
-  /** A removal listener for the idle resources cache. */
-  final class IdleCacheRemovalListener implements RemovalListener<ResourceKey<K>, R> {
+  /** An eviction listener for the idle resources in the pool. */
+  final class IdleEvictionListener implements EvictionListener<K> {
 
     /**
      * Atomically transitions the resource to a state where it can no longer be used. If the
      * resource is idle then it is immediately discarded by invalidating it in the primary cache.
      */
     @Override
-    public void onRemoval(RemovalNotification<ResourceKey<K>, R> notification) {
-      boolean expired = notification.getCause() == RemovalCause.EXPIRED;
-      if (!expired) {
-        return;
-      }
-      ResourceKey<K> resourceKey = notification.getKey();
+    public void onEviction(ResourceKey<K> resourceKey) {
       for (;;) {
         Status status = resourceKey.getStatus();
         switch (status) {

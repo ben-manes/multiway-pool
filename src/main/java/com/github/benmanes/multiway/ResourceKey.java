@@ -18,6 +18,7 @@ package com.github.benmanes.multiway;
 import java.util.concurrent.TransferQueue;
 import java.util.concurrent.atomic.AtomicReference;
 
+import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
 import com.google.common.base.Objects;
@@ -31,7 +32,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
  * @author Ben Manes (ben.manes@gmail.com)
  */
 @ThreadSafe
-final class ResourceKey<K> {
+abstract class ResourceKey<K> implements Linked<ResourceKey<K>> {
 
   /** The status of the resource in the pool. */
   enum Status {
@@ -79,6 +80,12 @@ final class ResourceKey<K> {
     getQueue().remove(this);
   }
 
+  /** Retrieves the time, in nanoseconds, that the resource became idle in the pool. */
+  abstract long getAccessTime();
+
+  /** Sets the time, in nanoseconds, that the resource became idle in the pool. */
+  abstract void setAccessTime(long accessTimeNanos);
+
   /* ---------------- IDLE --> ? -------------- */
 
   /** Attempts to transition the entry from idle to in-flight (when borrowing). */
@@ -122,5 +129,93 @@ final class ResourceKey<K> {
         .add("status", status)
         .add("key", key)
         .toString();
+  }
+
+  /** A resource key used when idle caching is disabled (does not support links). */
+  static final class UnlinkedResourceKey<K> extends ResourceKey<K> {
+
+    UnlinkedResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key) {
+      super(queue, status, key);
+    }
+
+    @Override
+    long getAccessTime() {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    void setAccessTime(long accessTimeNanos) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public ResourceKey<K> getPrevious() {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setPrevious(ResourceKey<K> prev) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public ResourceKey<K> getNext() {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setNext(ResourceKey<K> next) {
+      throw new UnsupportedOperationException();
+    }
+  }
+
+  /** A resource key used when idle caching is enabled (access order). */
+  static final class LinkedResourceKey<K> extends ResourceKey<K> {
+    @GuardedBy("idleLock")
+    ResourceKey<K> prev;
+    @GuardedBy("idleLock")
+    ResourceKey<K> next;
+    @GuardedBy("idleLock")
+    long accessTimeNanos;
+
+    LinkedResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key) {
+      super(queue, status, key);
+    }
+
+    @Override
+    @GuardedBy("idleLock")
+    long getAccessTime() {
+      return accessTimeNanos;
+    }
+
+    @Override
+    @GuardedBy("idleLock")
+    void setAccessTime(long accessTimeNanos) {
+      this.accessTimeNanos = accessTimeNanos;
+    }
+
+    @Override
+    @GuardedBy("idleLock")
+    public ResourceKey<K> getPrevious() {
+      return prev;
+    }
+
+    @Override
+    @GuardedBy("idleLock")
+    public void setPrevious(ResourceKey<K> prev) {
+      this.prev = prev;
+    }
+
+    @Override
+    @GuardedBy("idleLock")
+    public ResourceKey<K> getNext() {
+      return next;
+    }
+
+    @Override
+    @GuardedBy("idleLock")
+    public void setNext(ResourceKey<K> next) {
+      this.next = next;
+    }
   }
 }
