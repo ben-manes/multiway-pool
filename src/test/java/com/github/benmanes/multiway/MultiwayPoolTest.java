@@ -19,6 +19,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Queue;
 import java.util.UUID;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
@@ -31,6 +32,7 @@ import com.github.benmanes.multiway.ResourceKey.Status;
 import com.github.benmanes.multiway.TransferPool.LoadingTransferPool;
 import com.github.benmanes.multiway.TransferPool.ResourceHandle;
 import com.google.common.base.Stopwatch;
+import com.google.common.base.Supplier;
 import com.google.common.cache.Weigher;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Queues;
@@ -559,6 +561,29 @@ public final class MultiwayPoolTest {
     } catch (IllegalStateException e) {
       assertThat(((ReentrantLock) multiway.timeToIdlePolicy.get().idleLock).isLocked(), is(false));
     }
+  }
+
+  @Test
+  public void customQueue() {
+    final AtomicInteger queues = new AtomicInteger();
+    Supplier<BlockingQueue<Object>> queueSupplier = new Supplier<BlockingQueue<Object>>() {
+      @Override public BlockingQueue<Object> get() {
+        queues.incrementAndGet();
+        return Queues.newLinkedBlockingQueue();
+      }
+    };
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
+        .queueSupplier(queueSupplier));
+    for (int i = 0; i < 10; i++) {
+      getAndRelease(i);
+    }
+    for (int i = 0; i < 10; i++) {
+      Handle<UUID> handle = multiway.borrow(5, 1, TimeUnit.MINUTES);
+      handle.release(1, TimeUnit.MINUTES);
+    }
+    assertThat(queues.get(), is(10));
+    assertThat(multiway.size(), is(10L));
+    assertThat(multiway.transferQueues.size(), is(10L));
   }
 
   @Test

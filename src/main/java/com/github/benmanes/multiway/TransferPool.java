@@ -16,9 +16,9 @@
 package com.github.benmanes.multiway;
 
 import java.util.List;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TransferQueue;
 import java.util.logging.Logger;
@@ -32,6 +32,7 @@ import com.github.benmanes.multiway.ResourceKey.UnlinkedResourceKey;
 import com.github.benmanes.multiway.TimeToIdlePolicy.EvictionListener;
 import com.google.common.base.Objects;
 import com.google.common.base.Optional;
+import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
 import com.google.common.base.Ticker;
 import com.google.common.cache.Cache;
@@ -43,6 +44,7 @@ import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
 import com.google.common.cache.Weigher;
 import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.ForwardingBlockingQueue;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
@@ -80,29 +82,31 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
    */
 
   static final Logger log = Logger.getLogger(TransferPool.class.getName());
-  static final ResourceLifecycle<Object, Object> DISCARDING_LIFECYCLE =
-      new ResourceLifecycle<Object, Object>() {};
-
   final LoadingCache<K, TransferQueue<ResourceKey<K>>> transferQueues;
   final ResourceLifecycle<? super K, ? super R> lifecycle;
   final Optional<TimeToIdlePolicy<K, R>> timeToIdlePolicy;
+  final Supplier<BlockingQueue<Object>> queueSupplier;
   final Cache<ResourceKey<K>, R> cache;
 
-  @SuppressWarnings("unchecked")
   TransferPool(MultiwayPoolBuilder<? super K, ? super R> builder) {
-    lifecycle = (ResourceLifecycle<? super K, ? super R>) Objects.firstNonNull(
-        builder.lifecycle, DISCARDING_LIFECYCLE);
     timeToIdlePolicy = makeTimeToIdlePolicy(builder);
+    lifecycle = builder.getResourceLifecycle();
+    queueSupplier = builder.getQueueSupplier();
     transferQueues = makeTransferQueues();
     cache = makeCache(builder);
   }
 
   /** Creates a mapping from the resource category to its transfer queue of available keys. */
-  static <K> LoadingCache<K, TransferQueue<ResourceKey<K>>> makeTransferQueues() {
+  LoadingCache<K, TransferQueue<ResourceKey<K>>> makeTransferQueues() {
     return CacheBuilder.newBuilder().weakValues().build(
         new CacheLoader<K, TransferQueue<ResourceKey<K>>>() {
+          @SuppressWarnings("unchecked")
           @Override public TransferQueue<ResourceKey<K>> load(K key) throws Exception {
-            return new LinkedTransferQueue<ResourceKey<K>>();
+            BlockingQueue<?> queue = queueSupplier.get();
+            checkState(queue.isEmpty(), "Produced queue must be empty");
+            return (queue instanceof TransferQueue<?>)
+                ? (TransferQueue<ResourceKey<K>>) queue
+                : new TransferQueueAdapter<>((BlockingQueue<ResourceKey<K>>) queue);
           }
         });
   }
@@ -529,6 +533,46 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
             return;
         }
       }
+    }
+  }
+
+  /** Adapts a {@link BlockingQueue} to the {@link TransferQueue} interface. */
+  static final class TransferQueueAdapter<E> extends ForwardingBlockingQueue<E>
+      implements TransferQueue<E> {
+    final BlockingQueue<E> delegate;
+
+    TransferQueueAdapter(BlockingQueue<E> delegate) {
+      this.delegate = checkNotNull(delegate);
+    }
+
+    @Override
+    public boolean tryTransfer(E e) {
+      return false;
+    }
+
+    @Override
+    public void transfer(E e) throws InterruptedException {
+      delegate.add(e);
+    }
+
+    @Override
+    public boolean tryTransfer(E e, long timeout, TimeUnit unit) throws InterruptedException {
+      return delegate.offer(e, timeout, unit);
+    }
+
+    @Override
+    public boolean hasWaitingConsumer() {
+      return false;
+    }
+
+    @Override
+    public int getWaitingConsumerCount() {
+      return 0;
+    }
+
+    @Override
+    protected BlockingQueue<E> delegate() {
+      return delegate;
     }
   }
 }

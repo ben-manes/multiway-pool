@@ -15,9 +15,14 @@
  */
 package com.github.benmanes.multiway;
 
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TransferQueue;
 
 import com.github.benmanes.multiway.TransferPool.LoadingTransferPool;
+import com.google.common.base.Objects;
+import com.google.common.base.Supplier;
 import com.google.common.base.Ticker;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheStats;
@@ -48,6 +53,15 @@ import static com.google.common.base.Preconditions.checkState;
  * @author Ben Manes (ben.manes@gmail.com)
  */
 public final class MultiwayPoolBuilder<K, R> {
+  static final ResourceLifecycle<Object, Object> DISCARDING_LIFECYCLE =
+      new ResourceLifecycle<Object, Object>() {};
+  static final Supplier<BlockingQueue<Object>> LTQ_SUPPLIER =
+      new Supplier<BlockingQueue<Object>>() {
+        @Override public BlockingQueue<Object> get() {
+          return new LinkedTransferQueue<Object>();
+        }
+      };
+
   static final int UNSET_INT = -1;
 
   boolean recordStats;
@@ -61,8 +75,19 @@ public final class MultiwayPoolBuilder<K, R> {
   long expireAfterAccessNanos = UNSET_INT;
 
   ResourceLifecycle<? super K, ? super R> lifecycle;
+  Supplier<BlockingQueue<Object>> queueSupplier;
 
   MultiwayPoolBuilder() {}
+
+  Supplier<BlockingQueue<Object>> getQueueSupplier() {
+    return Objects.firstNonNull(queueSupplier, LTQ_SUPPLIER);
+  }
+
+  @SuppressWarnings("unchecked")
+  ResourceLifecycle<? super K, ? super R> getResourceLifecycle() {
+    return (ResourceLifecycle<? super K, ? super R>) Objects.firstNonNull(
+        lifecycle, DISCARDING_LIFECYCLE);
+  }
 
   /** Constructs a new builder with no automatic eviction of any kind. */
   public static MultiwayPoolBuilder<Object, Object> newBuilder() {
@@ -210,7 +235,6 @@ public final class MultiwayPoolBuilder<K, R> {
    * created, borrowed, released, or removed.
    *
    * @param lifecycle the listener used for resource life cycle events
-   * @return a multiway pool having the requested features
    */
   public <K1 extends K, R1 extends R> MultiwayPoolBuilder<K1, R1> lifecycle(
       ResourceLifecycle<? super K1, ? super R1> lifecycle) {
@@ -221,6 +245,20 @@ public final class MultiwayPoolBuilder<K, R> {
     MultiwayPoolBuilder<K1, R1> self = (MultiwayPoolBuilder<K1, R1>) this;
     self.lifecycle = checkNotNull(lifecycle);
     return self;
+  }
+
+  /**
+   * Specifies the supplier used for creating the queue per resource type. The queue holds the idle
+   * resources in the pool, being polled when borrowing and added to when releasing. If the queue
+   * implements {@link TransferQueue} additional optimizations are used to exchange resources
+   * efficiently.
+   *
+   * @param queueSupplier the supplier of a new empty queue
+   */
+  public MultiwayPoolBuilder<K, R> queueSupplier(Supplier<BlockingQueue<Object>> queueSupplier) {
+    checkState(this.queueSupplier == null);
+    this.queueSupplier = checkNotNull(queueSupplier);
+    return this;
   }
 
   /**
