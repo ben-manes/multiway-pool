@@ -201,7 +201,6 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       ResourceKey<K> resourceKey = (timeoutNanos == 0)
           ? queue.poll()
           : queue.poll(timeoutNanos, TimeUnit.NANOSECONDS);
-
       if (resourceKey == null) {
         return newResourceHandle(key, loader, queue);
       }
@@ -395,16 +394,26 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
 
     /** Returns the resource to the pool so it can be borrowed by another caller. */
     void releaseToPool(long timeout, TimeUnit unit) {
-      // Add the resource to the idle cache if present. If the resource was removed for any
-      // other reason while being added, it must then be discarded afterwards
+      registerAsIdle();
+      offerToPool(timeout, unit);
+      resource = null;
+    }
+
+    /**
+     * Add the resource to the idle cache if present. If the resource was removed for any other
+     * reason while being added, it must then be discarded afterwards
+     */
+    void registerAsIdle() {
       if (timeToIdlePolicy.isPresent()) {
         timeToIdlePolicy.get().add(resourceKey);
         if (resourceKey.getStatus() != Status.IDLE) {
           timeToIdlePolicy.get().invalidate(resourceKey);
         }
       }
+    }
 
-      // Attempt to transfer the resource to another thread, else return it to the queue
+    /** Attempt to transfer the resource to another thread, else return it to the queue. */
+    void offerToPool(long timeout, TimeUnit unit) {
       TransferQueue<ResourceKey<K>> queue = resourceKey.getQueue();
       try {
         boolean transferred = (timeout == 0)
@@ -419,8 +428,6 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       if (resourceKey.getStatus() == Status.DEAD) {
         resourceKey.removeFromTransferQueue();
       }
-
-      resource = null;
     }
 
     /** Discards the resource after it has become dead. */
