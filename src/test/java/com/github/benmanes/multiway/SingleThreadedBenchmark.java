@@ -15,16 +15,25 @@
  */
 package com.github.benmanes.multiway;
 
+import java.util.ArrayDeque;
+import java.util.Collection;
+import java.util.Queue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.LinkedTransferQueue;
+import java.util.concurrent.TimeUnit;
 
 import com.google.caliper.Param;
 import com.google.caliper.Runner;
 import com.google.caliper.SimpleBenchmark;
 import com.google.common.base.Supplier;
+import com.google.common.collect.ForwardingQueue;
+import com.google.common.collect.Queues;
+
+import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  * A simple, single threaded benchmark.
@@ -69,6 +78,16 @@ public final class SingleThreadedBenchmark extends SimpleBenchmark {
         return new ArrayBlockingQueue<>(1024);
       }
     },
+    SAQ() {
+      @Override public BlockingQueue<Object> get() {
+        return new BlockingQueueAdapter<>(Queues.synchronizedQueue(new ArrayDeque<>()));
+      }
+    },
+    CLQ() {
+      @Override public BlockingQueue<Object> get() {
+        return new BlockingQueueAdapter<>(new ConcurrentLinkedQueue<>());
+      }
+    },
     LBQ() {
       @Override public BlockingQueue<Object> get() {
         return new LinkedBlockingQueue<>();
@@ -84,5 +103,61 @@ public final class SingleThreadedBenchmark extends SimpleBenchmark {
         return new LinkedBlockingDeque<>();
       }
     };
+  }
+
+  /** A non-robust adapter allowing a non-blocking queue to be under a blocking facade. */
+  static final class BlockingQueueAdapter<E> extends ForwardingQueue<E>
+      implements BlockingQueue<E> {
+    final Queue<E> delegate;
+
+    BlockingQueueAdapter(Queue<E> delegate) {
+      this.delegate = checkNotNull(delegate);
+    }
+
+    @Override
+    public void put(E e) throws InterruptedException {
+      delegate.add(e);
+    }
+
+    @Override
+    public boolean offer(E e, long timeout, TimeUnit unit) throws InterruptedException {
+      return delegate.offer(e);
+    }
+
+    @Override
+    public E take() throws InterruptedException {
+      return delegate.poll();
+    }
+
+    @Override
+    public E poll(long timeout, TimeUnit unit) throws InterruptedException {
+      return delegate.poll();
+    }
+
+    @Override
+    public int remainingCapacity() {
+      return Integer.MAX_VALUE;
+    }
+
+    @Override
+    public int drainTo(Collection<? super E> c) {
+      return drainTo(c, Integer.MAX_VALUE);
+    }
+
+    @Override
+    public int drainTo(Collection<? super E> c, int maxElements) {
+      E next;
+      int drained = 0;
+      while (((next = poll()) != null) && (drained < maxElements)) {
+        c.add(next);
+        drained++;
+      }
+      return drained;
+    }
+
+    @Override
+    protected Queue<E> delegate() {
+      return delegate;
+    }
   }
 }

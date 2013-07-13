@@ -33,9 +33,10 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
 /**
- * A TransferPoolBuilder of {@link TransferPool} instances with support for least-recently-used eviction and
- * time-based expiration of resources. A notification is made when a resource is created,
- * borrowed, released, or removed. By default instances will not perform any type of eviction.
+ * A MultiwayPoolBuilder of {@link MultiwayPool} instances with support for least-recently-used
+ * eviction and time-based expiration of resources. A notification is made when a resource is
+ * created, borrowed, released, or removed. By default instances will not perform any type of
+ * eviction.
  * <p>
  * Usage example:
  * <pre>   {@code

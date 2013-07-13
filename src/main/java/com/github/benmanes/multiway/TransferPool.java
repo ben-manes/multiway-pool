@@ -59,29 +59,31 @@ import static com.google.common.base.Preconditions.checkState;
 class TransferPool<K, R> implements MultiwayPool<K, R> {
 
   /*
-   * An object pool must be optimized around resources regularly being checked-out and returned by
-   * multiple threads. A naive implementation that guards the pool with a single lock will suffer
+   * An object pool must be optimized around resources regularly being checked in and out
+   * concurrently. A naive implementation that guards the pool with a single lock will suffer
    * contention by the frequent access if resources are used in short bursts.
    *
-   * The basic strategy denormalizes the resources into a flattened cache, which provides the
+   * The basic strategy is to denormalize the resources into a flattened cache, which provides the
    * maximum size and time-to-live policies. The resources are organized into single-way pools as a
-   * view layered above the cache, with each pool represented as a collection of cache keys. These
-   * pools are implemented as transfer queues, which utilize elimination to reduce contention. A
-   * thread returning a resource to the pool will first attempting to exchange it with a thread
-   * checking one out, falling back to storing it in the queue if a transfer is unsuccessful.
+   * view layered above the cache, with each pool represented as a collection of cache keys that are
+   * available to be borrowed. These pools are implemented as transfer queues to utilize elimination
+   * in order to reduce contention. A thread returning a resource to the pool will first attempt
+   * to exchange it with a thread checking one out, falling back to storing it in the queue if a
+   * transfer is unsuccessful.
    *
    * The time-to-idle policy is implemented as the duration when the resource is not being used,
    * rather than the duration that the resource has resided in the primary cache not being accessed.
-   * This policy is implemented as a queue ordered by access time, where the head is the resource
-   * that has remained idle in the pool the longest.
+   * This policy is implemented as a time ordered queue where the head is the resource that has
+   * remained idle in the pool the longest.
    *
-   * The removal of unused queues is performed aggressively by using weak references. The resource's
-   * cache key retains a strong reference to its queue, thereby retaining the pool while there are
-   * associated resources in the cache or it is being used. When there are no resources referencing
-   * to the queue then the garbage collector will eagerly discard the queue.
+   * The removal of unused transfer queues is performed aggressively by using weak references. The
+   * resource's cache key retains a strong reference to its queue, thereby retaining the pool while
+   * there are associated resources in the cache or it is being used. When there are no resources
+   * referencing to the queue then the garbage collector will eagerly discard the transfer queue.
    */
 
   static final Logger log = Logger.getLogger(TransferPool.class.getName());
+
   final LoadingCache<K, TransferQueue<ResourceKey<K>>> transferQueues;
   final ResourceLifecycle<? super K, ? super R> lifecycle;
   final Optional<TimeToIdlePolicy<K, R>> timeToIdlePolicy;

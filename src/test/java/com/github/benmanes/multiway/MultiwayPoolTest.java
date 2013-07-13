@@ -15,12 +15,14 @@
  */
 package com.github.benmanes.multiway;
 
+import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,7 +37,6 @@ import com.google.common.base.Stopwatch;
 import com.google.common.base.Supplier;
 import com.google.common.cache.Weigher;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Queues;
 import com.google.common.testing.FakeTicker;
 import com.google.common.testing.GcFinalization;
 import org.testng.Assert;
@@ -569,7 +570,7 @@ public final class MultiwayPoolTest {
     Supplier<BlockingQueue<Object>> queueSupplier = new Supplier<BlockingQueue<Object>>() {
       @Override public BlockingQueue<Object> get() {
         queues.incrementAndGet();
-        return Queues.newLinkedBlockingQueue();
+        return new LinkedBlockingQueue<>();
       }
     };
     multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
@@ -597,7 +598,7 @@ public final class MultiwayPoolTest {
 
       @Override
       public void run() {
-        Deque<Handle<?>> handles = Queues.newArrayDeque();
+        Deque<Handle<?>> handles = new ArrayDeque<>();
         for (int i = 0; i < 100; i++) {
           execute(handles, i);
           yield();
