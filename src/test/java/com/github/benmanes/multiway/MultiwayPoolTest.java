@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.ReentrantLock;
 
 import com.github.benmanes.multiway.ResourceKey.Status;
 import com.github.benmanes.multiway.TransferPool.LoadingTransferPool;
@@ -150,8 +151,7 @@ public final class MultiwayPoolTest {
     });
     assertThat(handle.get(), is(expected));
     handle.release();
-
-    multiway.invalidateAll();
+    pool.invalidateAll();
   }
 
   @Test
@@ -408,7 +408,7 @@ public final class MultiwayPoolTest {
   @Test
   public void invalidate() {
     for (int i = 0; i < 10; i++) {
-      multiway.borrow(i);
+      getAndRelease(i);
     }
     multiway.invalidate(5);
     assertThat(multiway.size(), is(9L));
@@ -417,7 +417,7 @@ public final class MultiwayPoolTest {
   @Test
   public void invalidateAll() {
     for (int i = 0; i < 10; i++) {
-      multiway.borrow(i);
+      getAndRelease(i);
     }
     multiway.invalidateAll();
     assertThat(multiway.size(), is(0L));
@@ -515,7 +515,7 @@ public final class MultiwayPoolTest {
   }
 
   @Test
-  public void lifecycle_onRemove_fail() {
+  public void lifecycle_onRemove_fail_pool() {
     multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
         .lifecycle(new ResourceLifecycle<Integer, UUID>() {
           @Override public void onRemoval(Integer key, UUID resource) {
@@ -525,6 +525,40 @@ public final class MultiwayPoolTest {
     getAndRelease(KEY_1);
     multiway.invalidateAll();
     assertThat(multiway.cache.size(), is(0L));
+  }
+
+  @Test
+  public void lifecycle_onRemove_fail_handle() {
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
+        .lifecycle(new ResourceLifecycle<Integer, UUID>() {
+          @Override public void onRemoval(Integer key, UUID resource) {
+            throw new UnsupportedOperationException();
+          }
+        }));
+    Handle<UUID> handle = multiway.borrow(KEY_1);
+    try {
+      handle.invalidate();
+      Assert.fail();
+    } catch (UnsupportedOperationException e) {
+      assertThat(multiway.size(), is(0L));
+    }
+  }
+
+  @Test
+  public void unlockOnCleanup() {
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
+        .expireAfterAccess(1, TimeUnit.MINUTES));
+    Runnable runner = new Runnable() {
+      @Override public void run() {
+        throw new IllegalStateException();
+      }
+    };
+    try {
+      multiway.timeToIdlePolicy.get().schedule(runner);
+      Assert.fail();
+    } catch (IllegalStateException e) {
+      assertThat(((ReentrantLock) multiway.timeToIdlePolicy.get().idleLock).isLocked(), is(false));
+    }
   }
 
   @Test
