@@ -411,7 +411,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
             ? queue.tryTransfer(resourceKey)
             : queue.tryTransfer(resourceKey, timeout, unit);
         if (!transferred) {
-          queue.add(resourceKey);
+          queue.put(resourceKey);
         }
       } catch (InterruptedException e) {
         queue.add(resourceKey);
@@ -552,7 +552,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
 
     @Override
     public void transfer(E e) throws InterruptedException {
-      delegate.add(e);
+      delegate.put(e);
     }
 
     @Override
