@@ -66,7 +66,7 @@ public final class MultiwayPoolTest {
 
   @SuppressWarnings("unchecked")
   LoadingTransferPool<Integer, UUID> makeMultiwayPool(MultiwayPoolBuilder<?, ?> builder) {
-    MultiwayPoolBuilder<Object, Object> pools = (MultiwayPoolBuilder<Object, Object>) builder;
+    MultiwayPoolBuilder<Integer, UUID> pools = (MultiwayPoolBuilder<Integer, UUID>) builder;
     if (pools.lifecycle == null) {
       pools.lifecycle(lifecycle);
     }
@@ -140,7 +140,7 @@ public final class MultiwayPoolTest {
 
   @Test
   public void borrow_callable() {
-    MultiwayPool<Object, UUID> pool = MultiwayPoolBuilder.newBuilder().build();
+    MultiwayPool<Integer, UUID> pool = MultiwayPoolBuilder.newBuilder().build();
 
     final UUID expected = UUID.randomUUID();
     Handle<UUID> handle = pool.borrow(KEY_1, new Callable<UUID>() {
@@ -455,11 +455,11 @@ public final class MultiwayPoolTest {
   public void lifecycle_onCreate_fail() {
     final AtomicBoolean onRemovalCalled = new AtomicBoolean();
     multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
-        .lifecycle(new ResourceLifecycle<Object, UUID>() {
-          @Override public void onCreate(Object key, UUID resource) {
+        .lifecycle(new ResourceLifecycle<Integer, UUID>() {
+          @Override public void onCreate(Integer key, UUID resource) {
             throw new UnsupportedOperationException();
           }
-          @Override public void onRemoval(Object key, UUID resource) {
+          @Override public void onRemoval(Integer key, UUID resource) {
             onRemovalCalled.set(true);
           }
         }));
@@ -476,11 +476,11 @@ public final class MultiwayPoolTest {
   public void lifecycle_onBorrow_fail() {
     final AtomicBoolean onRemovalCalled = new AtomicBoolean();
     multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
-        .lifecycle(new ResourceLifecycle<Object, UUID>() {
-          @Override public void onBorrow(Object key, UUID resource) {
+        .lifecycle(new ResourceLifecycle<Integer, UUID>() {
+          @Override public void onBorrow(Integer key, UUID resource) {
             throw new UnsupportedOperationException();
           }
-          @Override public void onRemoval(Object key, UUID resource) {
+          @Override public void onRemoval(Integer key, UUID resource) {
             onRemovalCalled.set(true);
           }
         }));
@@ -497,11 +497,11 @@ public final class MultiwayPoolTest {
   public void lifecycle_onRelease_fail() {
     final AtomicBoolean onRemovalCalled = new AtomicBoolean();
     multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
-        .lifecycle(new ResourceLifecycle<Object, UUID>() {
-          @Override public void onRelease(Object key, UUID resource) {
+        .lifecycle(new ResourceLifecycle<Integer, UUID>() {
+          @Override public void onRelease(Integer key, UUID resource) {
             throw new UnsupportedOperationException();
           }
-          @Override public void onRemoval(Object key, UUID resource) {
+          @Override public void onRemoval(Integer key, UUID resource) {
             onRemovalCalled.set(true);
           }
         }));
@@ -517,8 +517,8 @@ public final class MultiwayPoolTest {
   @Test
   public void lifecycle_onRemove_fail() {
     multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
-        .lifecycle(new ResourceLifecycle<Object, UUID>() {
-          @Override public void onRemoval(Object key, UUID resource) {
+        .lifecycle(new ResourceLifecycle<Integer, UUID>() {
+          @Override public void onRemoval(Integer key, UUID resource) {
             throw new UnsupportedOperationException();
           }
         }));
