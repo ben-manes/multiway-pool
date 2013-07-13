@@ -79,17 +79,21 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
    */
 
   static final Logger log = Logger.getLogger(TransferPool.class.getName());
+  static final ResourceLifecycle<Object, Object> DISCARDING_LIFECYCLE =
+      new ResourceLifecycle<Object, Object>() {};
 
   final LoadingCache<K, TransferQueue<ResourceKey<K>>> transferQueues;
   final ResourceLifecycle<? super K, ? super R> lifecycle;
   final Optional<TimeToIdlePolicy<K, R>> timeToIdlePolicy;
   final Cache<ResourceKey<K>, R> cache;
 
+  @SuppressWarnings("unchecked")
   TransferPool(MultiwayPoolBuilder<? super K, ? super R> builder) {
-    this.timeToIdlePolicy = makeTimeToIdlePolicy(builder);
-    this.transferQueues = makeTransferQueues();
-    this.lifecycle = builder.lifecycle;
-    this.cache = makeCache(builder);
+    timeToIdlePolicy = makeTimeToIdlePolicy(builder);
+    transferQueues = makeTransferQueues();
+    lifecycle = (ResourceLifecycle<? super K, ? super R>) Objects.firstNonNull(
+        builder.lifecycle, DISCARDING_LIFECYCLE);
+    cache = makeCache(builder);
   }
 
   /** Creates a mapping from the resource category to its transfer queue of available keys. */
@@ -153,8 +157,13 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     if (timeToIdlePolicy.isPresent()) {
       timeToIdlePolicy.get().invalidate(handle.resourceKey);
     }
-    lifecycle.onBorrow(key, handle.resource);
-    return handle;
+    try {
+      lifecycle.onBorrow(key, handle.resource);
+      return handle;
+    } catch (Exception e) {
+      handle.invalidate();
+      throw e;
+    }
   }
 
   /** Retrieves the next available handler, creating the resource if necessary. */
@@ -206,8 +215,13 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       R resource = cache.get(resourceKey, new Callable<R>() {
         @Override public R call() throws Exception {
           R resource = loader.call();
-          lifecycle.onCreate(resourceKey.getKey(), resource);
-          return resource;
+          try {
+            lifecycle.onCreate(resourceKey.getKey(), resource);
+            return resource;
+          } catch (Exception e) {
+            lifecycle.onRemoval(resourceKey.getKey(), resource);
+            throw e;
+          }
         }
       });
       return new ResourceHandle(resourceKey, resource);
@@ -320,6 +334,9 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       validate();
       try {
         lifecycle.onRelease(resourceKey.getKey(), resource);
+      } catch (Exception e) {
+        cache.invalidate(resourceKey);
+        throw e;
       } finally {
         recycle(timeout, unit);
       }

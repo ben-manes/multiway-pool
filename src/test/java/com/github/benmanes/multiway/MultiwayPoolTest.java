@@ -35,6 +35,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Queues;
 import com.google.common.testing.FakeTicker;
 import com.google.common.testing.GcFinalization;
+import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
@@ -44,6 +45,7 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
@@ -65,8 +67,10 @@ public final class MultiwayPoolTest {
   @SuppressWarnings("unchecked")
   LoadingTransferPool<Object, UUID> makeMultiwayPool(MultiwayPoolBuilder<?, ?> builder) {
     MultiwayPoolBuilder<Object, Object> pools = (MultiwayPoolBuilder<Object, Object>) builder;
-    return (LoadingTransferPool<Object, UUID>) pools
-        .lifecycle(lifecycle).recordStats().build(new TestResourceLoader());
+    if (pools.lifecycle == null) {
+      pools.lifecycle(lifecycle);
+    }
+    return (LoadingTransferPool<Object, UUID>) pools.build(new TestResourceLoader());
   }
 
   @Test
@@ -136,14 +140,18 @@ public final class MultiwayPoolTest {
 
   @Test
   public void borrow_callable() {
+    MultiwayPool<Object, UUID> pool = MultiwayPoolBuilder.newBuilder().build();
+
     final UUID expected = UUID.randomUUID();
-    Handle<UUID> handle = multiway.borrow(KEY_1, new Callable<UUID>() {
+    Handle<UUID> handle = pool.borrow(KEY_1, new Callable<UUID>() {
       @Override public UUID call() throws Exception {
         return expected;
       }
     });
     assertThat(handle.get(), is(expected));
     handle.release();
+
+    multiway.invalidateAll();
   }
 
   @Test
@@ -416,11 +424,107 @@ public final class MultiwayPoolTest {
   }
 
   @Test
+  public void tryToGetPooledResourceHandle_notFound() {
+    getAndRelease(KEY_1);
+    ResourceKey<Object> resourceKey = getResourceKey();
+
+    multiway.invalidateAll();
+    assertThat(multiway.tryToGetPooledResourceHandle(resourceKey), is(nullValue()));
+  }
+
+  @Test
+  public void tryToGetPooledResourceHandle_notIdle() {
+    getAndRelease(KEY_1);
+    ResourceKey<Object> resourceKey = getResourceKey();
+
+    resourceKey.goFromIdleToRetired();
+    assertThat(multiway.tryToGetPooledResourceHandle(resourceKey), is(nullValue()));
+  }
+
+  @Test
   public void stats() {
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder().recordStats());
+
     getAndRelease(KEY_1);
     getAndRelease(KEY_1);
     assertThat(multiway.stats().hitCount(), is(1L));
     assertThat(multiway.stats().loadSuccessCount(), is(1L));
+  }
+
+  @Test
+  public void lifecycle_onCreate_fail() {
+    final AtomicBoolean onRemovalCalled = new AtomicBoolean();
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
+        .lifecycle(new ResourceLifecycle<Object, UUID>() {
+          @Override public void onCreate(Object key, UUID resource) {
+            throw new UnsupportedOperationException();
+          }
+          @Override public void onRemoval(Object key, UUID resource) {
+            onRemovalCalled.set(true);
+          }
+        }));
+    try {
+      getAndRelease(KEY_1);
+      Assert.fail();
+    } catch (Exception e) {
+      assertThat(multiway.cache.size(), is(0L));
+      assertThat(onRemovalCalled.get(), is(true));
+    }
+  }
+
+  @Test
+  public void lifecycle_onBorrow_fail() {
+    final AtomicBoolean onRemovalCalled = new AtomicBoolean();
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
+        .lifecycle(new ResourceLifecycle<Object, UUID>() {
+          @Override public void onBorrow(Object key, UUID resource) {
+            throw new UnsupportedOperationException();
+          }
+          @Override public void onRemoval(Object key, UUID resource) {
+            onRemovalCalled.set(true);
+          }
+        }));
+    try {
+      getAndRelease(KEY_1);
+      Assert.fail();
+    } catch (Exception e) {
+      assertThat(multiway.cache.size(), is(0L));
+      assertThat(onRemovalCalled.get(), is(true));
+    }
+  }
+
+  @Test
+  public void lifecycle_onRelease_fail() {
+    final AtomicBoolean onRemovalCalled = new AtomicBoolean();
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
+        .lifecycle(new ResourceLifecycle<Object, UUID>() {
+          @Override public void onRelease(Object key, UUID resource) {
+            throw new UnsupportedOperationException();
+          }
+          @Override public void onRemoval(Object key, UUID resource) {
+            onRemovalCalled.set(true);
+          }
+        }));
+    try {
+      getAndRelease(KEY_1);
+      Assert.fail();
+    } catch (Exception e) {
+      assertThat(multiway.cache.size(), is(0L));
+      assertThat(onRemovalCalled.get(), is(true));
+    }
+  }
+
+  @Test
+  public void lifecycle_onRemove_fail() {
+    multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
+        .lifecycle(new ResourceLifecycle<Object, UUID>() {
+          @Override public void onRemoval(Object key, UUID resource) {
+            throw new UnsupportedOperationException();
+          }
+        }));
+    getAndRelease(KEY_1);
+    multiway.invalidateAll();
+    assertThat(multiway.cache.size(), is(0L));
   }
 
   @Test
