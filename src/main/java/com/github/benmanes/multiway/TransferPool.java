@@ -41,6 +41,7 @@ import com.google.common.cache.CacheStats;
 import com.google.common.cache.LoadingCache;
 import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
+import com.google.common.cache.Weigher;
 import com.google.common.collect.Lists;
 
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -89,10 +90,10 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
 
   @SuppressWarnings("unchecked")
   TransferPool(MultiwayPoolBuilder<? super K, ? super R> builder) {
-    timeToIdlePolicy = makeTimeToIdlePolicy(builder);
-    transferQueues = makeTransferQueues();
     lifecycle = (ResourceLifecycle<? super K, ? super R>) Objects.firstNonNull(
         builder.lifecycle, DISCARDING_LIFECYCLE);
+    timeToIdlePolicy = makeTimeToIdlePolicy(builder);
+    transferQueues = makeTransferQueues();
     cache = makeCache(builder);
   }
 
@@ -106,6 +107,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
         });
   }
 
+  /** Creates the denormalized cache of resources based on the builder configuration. */
   Cache<ResourceKey<K>, R> makeCache(MultiwayPoolBuilder<? super K, ? super R> builder) {
     CacheBuilder<Object, Object> cacheBuilder = CacheBuilder.newBuilder();
     if (builder.maximumSize != MultiwayPoolBuilder.UNSET_INT) {
@@ -115,7 +117,12 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       cacheBuilder.maximumWeight(builder.maximumWeight);
     }
     if (builder.weigher != null) {
-      cacheBuilder.weigher(builder.weigher);
+      final Weigher<? super K, ? super R> weigher = builder.weigher;
+      cacheBuilder.weigher(new Weigher<ResourceKey<K>, R>() {
+        @Override public int weigh(ResourceKey<K> resourceKey, R resource) {
+          return weigher.weigh(resourceKey.getKey(), resource);
+        }
+      });
     }
     if (builder.expireAfterWriteNanos != MultiwayPoolBuilder.UNSET_INT) {
       cacheBuilder.expireAfterWrite(builder.expireAfterWriteNanos, TimeUnit.NANOSECONDS);
@@ -130,7 +137,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     return cacheBuilder.build();
   }
 
-  /** Creates a cache of the idle resources eligible for expiration. */
+  /** Creates the time-to-idle policy for managing resources eligible for expiration. */
   Optional<TimeToIdlePolicy<K, R>> makeTimeToIdlePolicy(
       MultiwayPoolBuilder<? super K, ? super R> builder) {
     if (builder.expireAfterAccessNanos == -1) {
@@ -277,6 +284,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     return cache.stats();
   }
 
+  /** A multiway pool that can be automatically populated using a {@link ResourceLoader}. */
   static final class LoadingTransferPool<K, R> extends TransferPool<K, R>
       implements LoadingMultiwayPool<K, R> {
     final ResourceLoader<K, R> loader;
@@ -353,6 +361,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       }
     }
 
+    /** Ensures that the handle can be manipulated by the user. */
     void validate() {
       checkState(resource != null, "Stale handle to the resource for %s", resourceKey.getKey());
     }

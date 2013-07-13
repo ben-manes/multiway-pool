@@ -51,11 +51,11 @@ import static org.hamcrest.Matchers.nullValue;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 public final class MultiwayPoolTest {
-  private static final Object KEY_1 = new Object();
+  private static final Integer KEY_1 = 1;
 
   private FakeTicker ticker;
   private TestResourceLifecycle lifecycle;
-  private LoadingTransferPool<Object, UUID> multiway;
+  private LoadingTransferPool<Integer, UUID> multiway;
 
   @BeforeMethod
   public void beforeMethod() {
@@ -65,12 +65,12 @@ public final class MultiwayPoolTest {
   }
 
   @SuppressWarnings("unchecked")
-  LoadingTransferPool<Object, UUID> makeMultiwayPool(MultiwayPoolBuilder<?, ?> builder) {
+  LoadingTransferPool<Integer, UUID> makeMultiwayPool(MultiwayPoolBuilder<?, ?> builder) {
     MultiwayPoolBuilder<Object, Object> pools = (MultiwayPoolBuilder<Object, Object>) builder;
     if (pools.lifecycle == null) {
       pools.lifecycle(lifecycle);
     }
-    return (LoadingTransferPool<Object, UUID>) pools.build(new TestResourceLoader());
+    return (LoadingTransferPool<Integer, UUID>) pools.build(new TestResourceLoader());
   }
 
   @Test
@@ -239,8 +239,8 @@ public final class MultiwayPoolTest {
   @Test
   public void evict_maximumWeight() {
     multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder().maximumWeight(10)
-        .weigher(new Weigher<Object, UUID>() {
-          @Override public int weigh(Object key, UUID resource) {
+        .weigher(new Weigher<Integer, UUID>() {
+          @Override public int weigh(Integer key, UUID resource) {
             return 5;
           }
         }));
@@ -426,7 +426,7 @@ public final class MultiwayPoolTest {
   @Test
   public void tryToGetPooledResourceHandle_notFound() {
     getAndRelease(KEY_1);
-    ResourceKey<Object> resourceKey = getResourceKey();
+    ResourceKey<Integer> resourceKey = getResourceKey();
 
     multiway.invalidateAll();
     assertThat(multiway.tryToGetPooledResourceHandle(resourceKey), is(nullValue()));
@@ -435,7 +435,7 @@ public final class MultiwayPoolTest {
   @Test
   public void tryToGetPooledResourceHandle_notIdle() {
     getAndRelease(KEY_1);
-    ResourceKey<Object> resourceKey = getResourceKey();
+    ResourceKey<Integer> resourceKey = getResourceKey();
 
     resourceKey.goFromIdleToRetired();
     assertThat(multiway.tryToGetPooledResourceHandle(resourceKey), is(nullValue()));
@@ -572,14 +572,14 @@ public final class MultiwayPoolTest {
     assertThat(lifecycle.created(), is((int) size + lifecycle.removals()));
   }
 
-  private UUID getAndRelease(Object key) {
+  private UUID getAndRelease(Integer key) {
     Handle<UUID> handle = multiway.borrow(key);
     UUID resource = handle.get();
     handle.release();
     return resource;
   }
 
-  private ResourceKey<Object> getResourceKey() {
+  private ResourceKey<Integer> getResourceKey() {
     return multiway.cache.asMap().keySet().iterator().next();
   }
 
@@ -588,35 +588,35 @@ public final class MultiwayPoolTest {
     LockSupport.parkNanos(1L);
   }
 
-  private static final class TestResourceLoader implements ResourceLoader<Object, UUID> {
-    @Override public UUID load(Object key) throws Exception {
+  private static final class TestResourceLoader implements ResourceLoader<Integer, UUID> {
+    @Override public UUID load(Integer key) throws Exception {
       return UUID.randomUUID();
     }
   }
 
-  private static final class TestResourceLifecycle extends ResourceLifecycle<Object, UUID> {
+  private static final class TestResourceLifecycle extends ResourceLifecycle<Integer, UUID> {
     final AtomicInteger created = new AtomicInteger();
     final AtomicInteger borrows = new AtomicInteger();
     final AtomicInteger releases = new AtomicInteger();
     final AtomicInteger removals = new AtomicInteger();
 
     @Override
-    public void onCreate(Object key, UUID resource) {
+    public void onCreate(Integer key, UUID resource) {
       created.incrementAndGet();
     }
 
     @Override
-    public void onBorrow(Object key, UUID resource) {
+    public void onBorrow(Integer key, UUID resource) {
       borrows.incrementAndGet();
     }
 
     @Override
-    public void onRelease(Object key, UUID resource) {
+    public void onRelease(Integer key, UUID resource) {
       releases.incrementAndGet();
     }
 
     @Override
-    public void onRemoval(Object key, UUID resource) {
+    public void onRemoval(Integer key, UUID resource) {
       removals.incrementAndGet();
     }
 
