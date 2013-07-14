@@ -16,6 +16,7 @@
 package com.github.benmanes.multiway;
 
 import java.util.List;
+import java.util.Map.Entry;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -43,7 +44,9 @@ import com.google.common.cache.LoadingCache;
 import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
 import com.google.common.cache.Weigher;
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.ForwardingBlockingQueue;
 
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -89,23 +92,25 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   final Optional<TimeToIdlePolicy<K, R>> timeToIdlePolicy;
   final Supplier<BlockingQueue<Object>> queueSupplier;
   final Cache<ResourceKey<K>, R> cache;
+  final Ticker ticker;
 
   TransferPool(MultiwayPoolBuilder<? super K, ? super R> builder) {
+    transferQueues = makeTransferQueues(builder.getConcurrencyLevel());
     timeToIdlePolicy = makeTimeToIdlePolicy(builder);
     lifecycle = builder.getResourceLifecycle();
     queueSupplier = builder.getQueueSupplier();
-    transferQueues = makeTransferQueues();
+    ticker = builder.getTicker();
     cache = makeCache(builder);
   }
 
   /** Creates a mapping from the resource category to its transfer queue of available keys. */
-  LoadingCache<K, TransferQueue<ResourceKey<K>>> makeTransferQueues() {
-    return CacheBuilder.newBuilder().weakValues().build(
+  LoadingCache<K, TransferQueue<ResourceKey<K>>> makeTransferQueues(int concurrencyLevel) {
+    return CacheBuilder.newBuilder().concurrencyLevel(concurrencyLevel).weakValues().build(
         new CacheLoader<K, TransferQueue<ResourceKey<K>>>() {
           @SuppressWarnings("unchecked")
           @Override public TransferQueue<ResourceKey<K>> load(K key) throws Exception {
             BlockingQueue<?> queue = queueSupplier.get();
-            checkState(queue.isEmpty(), "Produced queue must be empty");
+            checkState(queue.isEmpty(), "Supplied queue must be empty");
             return (queue instanceof TransferQueue<?>)
                 ? (TransferQueue<ResourceKey<K>>) queue
                 : new TransferQueueAdapter<>((BlockingQueue<ResourceKey<K>>) queue);
@@ -139,6 +144,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     if (builder.recordStats) {
       cacheBuilder.recordStats();
     }
+    cacheBuilder.concurrencyLevel(builder.getConcurrencyLevel());
     cacheBuilder.removalListener(new CacheRemovalListener());
     return cacheBuilder.build();
   }
@@ -149,9 +155,8 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     if (builder.expireAfterAccessNanos == -1) {
       return Optional.absent();
     }
-    Ticker ticker = (builder.ticker == null) ? Ticker.systemTicker() : builder.ticker;
     TimeToIdlePolicy<K, R> policy = new TimeToIdlePolicy<K, R>(
-        builder.expireAfterAccessNanos, ticker, new IdleEvictionListener());
+        builder.expireAfterAccessNanos, builder.getTicker(), new IdleEvictionListener());
     return Optional.of(policy);
   }
 
@@ -184,11 +189,11 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       Callable<? extends R> loader, long timeout, TimeUnit unit) {
     TransferQueue<ResourceKey<K>> queue = transferQueues.getUnchecked(key);
     long timeoutNanos = unit.toNanos(timeout);
-    long startNanos = System.nanoTime();
+    long startNanos = ticker.read();
     for (;;) {
       ResourceHandle handle = tryToGetResourceHandle(key, loader, queue, timeoutNanos);
       if (handle == null) {
-        long elapsed = System.nanoTime() - startNanos;
+        long elapsed = ticker.read() - startNanos;
         timeoutNanos = Math.max(0, timeoutNanos - elapsed);
       } else {
         return handle;
@@ -287,6 +292,15 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   @Override
   public CacheStats stats() {
     return cache.stats();
+  }
+
+  @Override
+  public String toString() {
+    Multimap<K, R> multimap = ArrayListMultimap.create();
+    for (Entry<ResourceKey<K>, R> entry : cache.asMap().entrySet()) {
+      multimap.put(entry.getKey().getKey(), entry.getValue());
+    }
+    return multimap.toString();
   }
 
   /** A multiway pool that can be automatically populated using a {@link ResourceLoader}. */

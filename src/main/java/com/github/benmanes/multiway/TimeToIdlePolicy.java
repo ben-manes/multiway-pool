@@ -50,8 +50,8 @@ final class TimeToIdlePolicy<K, R> {
     checkArgument(expireAfterAccessNanos >= 0L);
 
     this.ticker = checkNotNull(ticker);
-    this.idleQueue = new LinkedDeque<>();
     this.idleLock = new ReentrantLock();
+    this.idleQueue = new LinkedDeque<>();
     this.taskQueue = new ConcurrentLinkedQueue<>();
     this.expireAfterAccessNanos = expireAfterAccessNanos;
     this.evictionListener = checkNotNull(evictionListener);

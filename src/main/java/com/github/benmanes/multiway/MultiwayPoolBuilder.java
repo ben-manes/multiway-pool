@@ -62,7 +62,7 @@ public final class MultiwayPoolBuilder<K, R> {
           return new LinkedTransferQueue<Object>();
         }
       };
-
+  static final int DEFAULT_CONCURRENCY_LEVEL = 4;
   static final int UNSET_INT = -1;
 
   boolean recordStats;
@@ -75,10 +75,15 @@ public final class MultiwayPoolBuilder<K, R> {
   long expireAfterWriteNanos = UNSET_INT;
   long expireAfterAccessNanos = UNSET_INT;
 
-  ResourceLifecycle<? super K, ? super R> lifecycle;
+  int concurrencyLevel = UNSET_INT;
   Supplier<BlockingQueue<Object>> queueSupplier;
+  ResourceLifecycle<? super K, ? super R> lifecycle;
 
   MultiwayPoolBuilder() {}
+
+  Ticker getTicker() {
+    return Objects.firstNonNull(ticker, Ticker.systemTicker());
+  }
 
   Supplier<BlockingQueue<Object>> getQueueSupplier() {
     return Objects.firstNonNull(queueSupplier, LTQ_SUPPLIER);
@@ -90,9 +95,29 @@ public final class MultiwayPoolBuilder<K, R> {
         lifecycle, DISCARDING_LIFECYCLE);
   }
 
+  int getConcurrencyLevel() {
+    return (concurrencyLevel == UNSET_INT) ? DEFAULT_CONCURRENCY_LEVEL : concurrencyLevel;
+  }
+
   /** Constructs a new builder with no automatic eviction of any kind. */
   public static MultiwayPoolBuilder<Object, Object> newBuilder() {
     return new MultiwayPoolBuilder<Object, Object>();
+  }
+
+  /**
+   * Guides the allowed concurrency among update operations. Used as a hint for internal sizing.
+   * <p>
+   * Defaults to 4.
+   *
+   * @throws IllegalArgumentException if {@code concurrencyLevel} is not positive
+   * @throws IllegalStateException if a concurrency level was already set
+   */
+  public MultiwayPoolBuilder<K, R> concurrencyLevel(int concurrencyLevel) {
+    checkState(this.concurrencyLevel == UNSET_INT, "concurrency level was already set to %s",
+        this.concurrencyLevel);
+    checkArgument(concurrencyLevel > 0);
+    this.concurrencyLevel = concurrencyLevel;
+    return this;
   }
 
   /**
@@ -284,5 +309,32 @@ public final class MultiwayPoolBuilder<K, R> {
       ResourceLoader<K1, R1> loader) {
     checkNotNull(loader);
     return new LoadingTransferPool<K1, R1>(this, loader);
+  }
+
+  @Override
+  public String toString() {
+    Objects.ToStringHelper s = Objects.toStringHelper(this);
+    if (concurrencyLevel != UNSET_INT) {
+      s.add("concurrencyLevel", concurrencyLevel);
+    }
+    if (maximumSize != UNSET_INT) {
+      s.add("maximumSize", maximumSize);
+    }
+    if (maximumWeight != UNSET_INT) {
+      s.add("maximumWeight", maximumWeight);
+    }
+    if (expireAfterWriteNanos != UNSET_INT) {
+      s.add("expireAfterWrite", expireAfterWriteNanos + "ns");
+    }
+    if (expireAfterAccessNanos != UNSET_INT) {
+      s.add("expireAfterAccess", expireAfterAccessNanos + "ns");
+    }
+    if (lifecycle != null) {
+      s.addValue("resourceLifecycle");
+    }
+    if (queueSupplier != null) {
+      s.addValue("queueSupplier");
+    }
+    return s.toString();
   }
 }
