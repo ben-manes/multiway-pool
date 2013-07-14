@@ -336,20 +336,6 @@ public final class MultiwayPoolTest {
   }
 
   @Test
-  public void release_finalize() {
-    multiway.borrow(KEY_1);
-    GcFinalization.awaitFullGc();
-    multiway.cleanUp();
-    await().until(new Callable<Boolean>() {
-      @Override public Boolean call() throws Exception {
-        return !multiway.transferQueues.getUnchecked(KEY_1).isEmpty();
-      }
-    });
-    ResourceKey<?> resourceKey = getResourceKey();
-    assertThat(resourceKey.toString(), resourceKey.getStatus(), is(Status.IDLE));
-  }
-
-  @Test
   public void invalidate_whenInFlight() {
     @SuppressWarnings("rawtypes")
     ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);

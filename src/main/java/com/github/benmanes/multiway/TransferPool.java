@@ -461,20 +461,6 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
           .add("resource", resource)
           .toString();
     }
-
-    /**
-     * A last ditch effort to avoid resource leaks. This should not be relied upon and its mere
-     * existence has negative performance implications for the garbage collector.
-     */
-    @Override
-    protected void finalize() {
-      if (resource != null) {
-        String msg = String.format("Handle for %s -> %s was not properly released",
-            resourceKey.getKey().getClass().getName(), resource.getClass().getName());
-        log.warning(msg);
-        release();
-      }
-    }
   }
 
   /** A removal listener for the resource cache. */

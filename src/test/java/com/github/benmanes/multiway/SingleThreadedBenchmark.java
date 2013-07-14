@@ -32,6 +32,7 @@ import com.google.caliper.SimpleBenchmark;
 import com.google.common.base.Supplier;
 import com.google.common.collect.ForwardingQueue;
 import com.google.common.collect.Queues;
+import com.google.common.testing.GcFinalization;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
@@ -55,6 +56,7 @@ public final class SingleThreadedBenchmark extends SimpleBenchmark {
             return key;
           }
         });
+    GcFinalization.awaitFullGc();
   }
 
   public int timeBorrowAndRelease(int reps) {
