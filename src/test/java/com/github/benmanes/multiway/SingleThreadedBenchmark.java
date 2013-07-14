@@ -26,13 +26,12 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.TimeUnit;
 
+import com.google.caliper.Benchmark;
 import com.google.caliper.Param;
-import com.google.caliper.Runner;
-import com.google.caliper.SimpleBenchmark;
+import com.google.caliper.runner.CaliperMain;
 import com.google.common.base.Supplier;
 import com.google.common.collect.ForwardingQueue;
 import com.google.common.collect.Queues;
-import com.google.common.testing.GcFinalization;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
@@ -41,7 +40,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
  *
  * @author Ben Manes (ben@addepar.com)
  */
-public final class SingleThreadedBenchmark extends SimpleBenchmark {
+public final class SingleThreadedBenchmark extends Benchmark {
   static final int MASK = 15; // power-of-two
 
   LoadingMultiwayPool<Integer, Integer> multiway;
@@ -56,7 +55,6 @@ public final class SingleThreadedBenchmark extends SimpleBenchmark {
             return key;
           }
         });
-    GcFinalization.awaitFullGc();
   }
 
   public int timeBorrowAndRelease(int reps) {
@@ -70,7 +68,7 @@ public final class SingleThreadedBenchmark extends SimpleBenchmark {
   }
 
   public static void main(String[] args) {
-    Runner.main(SingleThreadedBenchmark.class, args);
+    CaliperMain.main(SingleThreadedBenchmark.class, args);
   }
 
   /** The type of blocking queue to back the pool by. */
@@ -82,7 +80,7 @@ public final class SingleThreadedBenchmark extends SimpleBenchmark {
     },
     SAQ() {
       @Override public BlockingQueue<Object> get() {
-        return new BlockingQueueAdapter<>(Queues.synchronizedQueue(new ArrayDeque<>()));
+        return new BlockingQueueAdapter<>(Queues.synchronizedQueue(new ArrayDeque<>(1024)));
       }
     },
     CLQ() {

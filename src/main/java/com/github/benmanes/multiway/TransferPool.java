@@ -22,7 +22,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TransferQueue;
-import java.util.logging.Logger;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
@@ -84,8 +83,6 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
    * there are associated resources in the cache or it is being used. When there are no resources
    * referencing to the queue then the garbage collector will eagerly discard the transfer queue.
    */
-
-  static final Logger log = Logger.getLogger(TransferPool.class.getName());
 
   final LoadingCache<K, TransferQueue<ResourceKey<K>>> transferQueues;
   final ResourceLifecycle<? super K, ? super R> lifecycle;
