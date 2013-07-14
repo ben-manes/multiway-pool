@@ -38,6 +38,8 @@ import static com.google.common.base.Preconditions.checkNotNull;
  */
 @ThreadSafe
 final class TimeToIdlePolicy<K, R> {
+  static final int AMORTIZED_THRESHOLD = 16;
+
   final LinkedDeque<ResourceKey<K>> idleQueue;
   final EvictionListener<K> evictionListener;
   final long expireAfterAccessNanos;
@@ -70,7 +72,7 @@ final class TimeToIdlePolicy<K, R> {
   /** Schedules the task to be applied to the idle policy. */
   void schedule(Runnable task) {
     taskQueue.add(task);
-    cleanUp();
+    cleanUp(AMORTIZED_THRESHOLD);
   }
 
   /** Determines whether the resource has expired. */
@@ -84,38 +86,40 @@ final class TimeToIdlePolicy<K, R> {
   }
 
   /** Performs any pending maintenance operations needed by the policy. */
-  void cleanUp() {
+  void cleanUp(int threshold) {
     if (idleLock.tryLock()) {
       try {
-        drainTaskQueue();
-        evict();
+        drainTaskQueue(threshold);
+        evict(threshold);
       } finally {
         idleLock.unlock();
       }
     }
   }
 
-  /** Applies the pending operations in the task queue. */
+  /** Applies the pending operations, up to the threshold limit, in the task queue. */
   @GuardedBy("idleLock")
-  void drainTaskQueue() {
-    Runnable task;
-    while ((task = taskQueue.poll()) != null) {
+  void drainTaskQueue(int threshold) {
+    for (int i = 0; i < threshold; i++) {
+      Runnable task = taskQueue.poll();
+      if (task == null) {
+        break;
+      }
       task.run();
     }
   }
 
   /** Evicts the resources that have exceeded the threshold for remaining idle. */
   @GuardedBy("idleLock")
-  void evict() {
+  void evict(int threshold) {
     long now = ticker.read();
-    ResourceKey<K> resourceKey;
-    while ((resourceKey = idleQueue.peek()) != null) {
-      if (hasExpired(resourceKey, now)) {
-        idleQueue.remove();
-        evictionListener.onEviction(resourceKey);
-      } else {
+    for (int i = 0; i < threshold; i++) {
+      ResourceKey<K> resourceKey = idleQueue.peek();
+      if ((resourceKey == null) || !hasExpired(resourceKey, now)) {
         break;
       }
+      idleQueue.remove();
+      evictionListener.onEviction(resourceKey);
     }
   }
 

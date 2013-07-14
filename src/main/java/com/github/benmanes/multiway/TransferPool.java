@@ -48,6 +48,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.ForwardingBlockingQueue;
 
+import static com.github.benmanes.multiway.TimeToIdlePolicy.AMORTIZED_THRESHOLD;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
@@ -187,9 +188,14 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     TransferQueue<ResourceKey<K>> queue = transferQueues.getUnchecked(key);
     long timeoutNanos = unit.toNanos(timeout);
     long startNanos = ticker.read();
+    boolean hasCleanedUp = false;
     for (;;) {
       ResourceHandle handle = tryToGetResourceHandle(key, loader, queue, timeoutNanos);
       if (handle == null) {
+        if (timeToIdlePolicy.isPresent() && !hasCleanedUp) {
+          timeToIdlePolicy.get().cleanUp(AMORTIZED_THRESHOLD);
+          hasCleanedUp = true;
+        }
         long elapsed = ticker.read() - startNanos;
         timeoutNanos = Math.max(0, timeoutNanos - elapsed);
       } else {
@@ -210,7 +216,6 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       }
       if (timeToIdlePolicy.isPresent() && timeToIdlePolicy.get().hasExpired(resourceKey)) {
         // Retry with another resource due to idle expiration
-        timeToIdlePolicy.get().cleanUp();
         return null;
       }
       return tryToGetPooledResourceHandle(resourceKey);
@@ -281,7 +286,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   @Override
   public void cleanUp() {
     if (timeToIdlePolicy.isPresent()) {
-      timeToIdlePolicy.get().cleanUp();
+      timeToIdlePolicy.get().cleanUp(Integer.MAX_VALUE);
     }
     cache.cleanUp();
   }

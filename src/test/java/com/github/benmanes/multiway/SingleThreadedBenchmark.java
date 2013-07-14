@@ -78,7 +78,7 @@ public final class SingleThreadedBenchmark extends Benchmark {
         return new ArrayBlockingQueue<>(1024);
       }
     },
-    SAQ() {
+    SAD() {
       @Override public BlockingQueue<Object> get() {
         return new BlockingQueueAdapter<>(Queues.synchronizedQueue(new ArrayDeque<>(1024)));
       }
