@@ -21,10 +21,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
+import com.github.benmanes.multiway.ResourceKey.Status;
 import com.google.common.base.Objects;
-import com.google.common.util.concurrent.Atomics;
-
-import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  * A key to the resource in the cache and the transfer queue.
@@ -32,7 +30,8 @@ import static com.google.common.base.Preconditions.checkNotNull;
  * @author Ben Manes (ben.manes@gmail.com)
  */
 @ThreadSafe
-abstract class ResourceKey<K> implements Linked<ResourceKey<K>> {
+abstract class ResourceKey<K> extends AtomicReference<Status> implements Linked<ResourceKey<K>> {
+  private static final long serialVersionUID = 1L;
 
   /** The status of the resource in the pool. */
   enum Status {
@@ -51,13 +50,12 @@ abstract class ResourceKey<K> implements Linked<ResourceKey<K>> {
   }
 
   final K key;
-  final AtomicReference<Status> status;
   final TransferQueue<ResourceKey<K>> queue;
 
   ResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key) {
-    this.status = Atomics.newReference(status);
-    this.queue = checkNotNull(queue);
-    this.key = checkNotNull(key);
+    super(status);
+    this.key = key;
+    this.queue = queue;
   }
 
   /** Retrieves the resource category key. */
@@ -67,7 +65,7 @@ abstract class ResourceKey<K> implements Linked<ResourceKey<K>> {
 
   /** The status of the entry in the pool. */
   Status getStatus() {
-    return status.get();
+    return get();
   }
 
   /** Retrieves the transfer queue the resource is associated with. */
@@ -86,53 +84,60 @@ abstract class ResourceKey<K> implements Linked<ResourceKey<K>> {
   /** Sets the time, in nanoseconds, that the resource became idle in the pool. */
   abstract void setAccessTime(long accessTimeNanos);
 
+  /** Adds the available resource to the policy to be evaluated for expiration. */
+  abstract Runnable getAddTask();
+
+  /** Removes the resource from the policy, e.g. when borrowed or discarded by the pool. */
+  abstract Runnable getRemovalTask();
+
   /* ---------------- IDLE --> ? -------------- */
 
   /** Attempts to transition the entry from idle to in-flight (when borrowing). */
   boolean goFromIdleToInFlight() {
-    return status.compareAndSet(Status.IDLE, Status.IN_FLIGHT);
+    return compareAndSet(Status.IDLE, Status.IN_FLIGHT);
   }
 
   /** Attempts to transition the entry from idle to retired (when evicting from the idle cache). */
   boolean goFromIdleToRetired() {
-    return status.compareAndSet(Status.IDLE, Status.RETIRED);
+    return compareAndSet(Status.IDLE, Status.RETIRED);
   }
 
   /** Attempts to transition the entry from idle to dead (when evicting from the cache). */
   boolean goFromIdleToDead() {
-    return status.compareAndSet(Status.IDLE, Status.DEAD);
+    return compareAndSet(Status.IDLE, Status.DEAD);
   }
 
   /* ---------------- IN_FLIGHT --> ? -------------- */
 
   /** Attempts to transition the entry from in-flight to retired (when evicting from the cache). */
   boolean goFromInFlightToRetired() {
-    return status.compareAndSet(Status.IN_FLIGHT, Status.RETIRED);
+    return compareAndSet(Status.IN_FLIGHT, Status.RETIRED);
   }
 
   /** Attempts to transition the entry from in-flight to retired (when releasing the handle). */
   boolean goFromInFlightToIdle() {
-    return status.compareAndSet(Status.IN_FLIGHT, Status.IDLE);
+    return compareAndSet(Status.IN_FLIGHT, Status.IDLE);
   }
 
   /* ---------------- RETIRED --> ? -------------- */
 
   /** Attempts to transition the entry from retired to dead (when releasing the handle). */
   boolean goFromRetiredToDead() {
-    return status.compareAndSet(Status.RETIRED, Status.DEAD);
+    return compareAndSet(Status.RETIRED, Status.DEAD);
   }
 
   @Override
   public String toString() {
     return Objects.toStringHelper(this)
         .add("id", System.identityHashCode(this))
-        .add("status", status)
+        .add("status", get())
         .add("key", key)
         .toString();
   }
 
   /** A resource key used when idle caching is disabled (does not support links). */
   static final class UnlinkedResourceKey<K> extends ResourceKey<K> {
+    private static final long serialVersionUID = 1L;
 
     UnlinkedResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key) {
       super(queue, status, key);
@@ -167,29 +172,59 @@ abstract class ResourceKey<K> implements Linked<ResourceKey<K>> {
     public void setNext(ResourceKey<K> next) {
       throw new UnsupportedOperationException();
     }
+
+    @Override
+    Runnable getAddTask() {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    Runnable getRemovalTask() {
+      throw new UnsupportedOperationException();
+    }
   }
 
   /** A resource key used when idle caching is enabled (access order). */
   static final class LinkedResourceKey<K> extends ResourceKey<K> {
+    private static final long serialVersionUID = 1L;
+
     @GuardedBy("idleLock")
     ResourceKey<K> prev;
     @GuardedBy("idleLock")
     ResourceKey<K> next;
-    @GuardedBy("idleLock")
-    long accessTimeNanos;
 
-    LinkedResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key) {
+    final Runnable addTask;
+    final Runnable removalTask;
+    volatile long accessTimeNanos;
+
+    LinkedResourceKey(TransferQueue<ResourceKey<K>> queue, Status status,
+        K key, final LinkedDeque<ResourceKey<K>> idleQueue) {
       super(queue, status, key);
+      this.addTask = new Runnable() {
+        @Override
+        @GuardedBy("idleLock")
+        public void run() {
+          if (getStatus() == Status.IDLE) {
+            setAccessTime(accessTimeNanos);
+            idleQueue.linkLast(LinkedResourceKey.this);
+          }
+        }
+      };
+      this.removalTask = new Runnable() {
+        @Override
+        @GuardedBy("idleLock")
+        public void run() {
+          idleQueue.remove(LinkedResourceKey.this);
+        }
+      };
     }
 
     @Override
-    @GuardedBy("idleLock")
     long getAccessTime() {
       return accessTimeNanos;
     }
 
     @Override
-    @GuardedBy("idleLock")
     void setAccessTime(long accessTimeNanos) {
       this.accessTimeNanos = accessTimeNanos;
     }
@@ -216,6 +251,16 @@ abstract class ResourceKey<K> implements Linked<ResourceKey<K>> {
     @GuardedBy("idleLock")
     public void setNext(ResourceKey<K> next) {
       this.next = next;
+    }
+
+    @Override
+    Runnable getAddTask() {
+      return addTask;
+    }
+
+    @Override
+    Runnable getRemovalTask() {
+      return removalTask;
     }
   }
 }

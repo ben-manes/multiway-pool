@@ -47,6 +47,7 @@ import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.ForwardingBlockingQueue;
+import com.google.common.util.concurrent.Uninterruptibles;
 
 import static com.github.benmanes.multiway.TimeToIdlePolicy.AMORTIZED_THRESHOLD;
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -229,7 +230,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       TransferQueue<ResourceKey<K>> queue) {
     try {
       final ResourceKey<K> resourceKey = timeToIdlePolicy.isPresent()
-          ? new LinkedResourceKey<K>(queue, Status.IN_FLIGHT, key)
+          ? new LinkedResourceKey<K>(queue, Status.IN_FLIGHT, key, timeToIdlePolicy.get().idleQueue)
           : new UnlinkedResourceKey<K>(queue, Status.IN_FLIGHT, key);
       R resource = cache.get(resourceKey, new Callable<R>() {
         @Override public R call() throws Exception {
@@ -338,8 +339,8 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     @Nullable R resource;
 
     ResourceHandle(ResourceKey<K> resourceKey, R resource) {
-      this.resourceKey = checkNotNull(resourceKey);
-      this.resource = checkNotNull(resource);
+      this.resourceKey = resourceKey;
+      this.resource = resource;
     }
 
     @Override
@@ -384,7 +385,9 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
 
     /** Ensures that the handle can be manipulated by the user. */
     void validate() {
-      checkState(resource != null, "Stale handle to the resource for %s", resourceKey.getKey());
+      if (resource == null) {
+        throw new IllegalStateException("Stale handle to the resource for " + resourceKey.getKey());
+      }
     }
 
     /** Returns the resource to the pool or discards it if the resource is no longer cached. */
@@ -441,7 +444,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
           queue.put(resourceKey);
         }
       } catch (InterruptedException e) {
-        queue.add(resourceKey);
+        Uninterruptibles.putUninterruptibly(queue, resourceKey);
       }
       if (resourceKey.getStatus() == Status.DEAD) {
         resourceKey.removeFromTransferQueue();

@@ -23,10 +23,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
-import com.github.benmanes.multiway.ResourceKey.Status;
 import com.google.common.base.Ticker;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
@@ -39,40 +37,58 @@ import static com.google.common.base.Preconditions.checkNotNull;
 @ThreadSafe
 final class TimeToIdlePolicy<K, R> {
   static final int AMORTIZED_THRESHOLD = 16;
+  static final int TASK_QUEUE_MASK = ceilingNextPowerOfTwo(
+      Runtime.getRuntime().availableProcessors()) - 1;
+
+  static int ceilingNextPowerOfTwo(int x) {
+    // From Hacker's Delight, Chapter 3, Harry S. Warren Jr.
+    return 1 << (Integer.SIZE - Integer.numberOfLeadingZeros(x - 1));
+  }
 
   final LinkedDeque<ResourceKey<K>> idleQueue;
   final EvictionListener<K> evictionListener;
+  final Queue<Runnable>[] taskQueues;
   final long expireAfterAccessNanos;
-  final Queue<Runnable> taskQueue;
   final Lock idleLock;
   final Ticker ticker;
 
+  @SuppressWarnings("unchecked")
   TimeToIdlePolicy(long expireAfterAccessNanos,
       Ticker ticker, EvictionListener<K> evictionListener) {
-    checkArgument(expireAfterAccessNanos >= 0L);
-
-    this.ticker = checkNotNull(ticker);
+    this.ticker = ticker;
     this.idleLock = new ReentrantLock();
     this.idleQueue = new LinkedDeque<>();
-    this.taskQueue = new ConcurrentLinkedQueue<>();
+    this.taskQueues = new Queue[TASK_QUEUE_MASK + 1];
     this.expireAfterAccessNanos = expireAfterAccessNanos;
     this.evictionListener = checkNotNull(evictionListener);
+
+    for (int i = 0; i < taskQueues.length; i++) {
+      taskQueues[i] = new ConcurrentLinkedQueue<>();
+    }
   }
 
   /** Adds an idle resource to be tracked for expiration. */
   void add(ResourceKey<K> key) {
-    schedule(new AddTask<K>(idleQueue, key, ticker.read()));
+    key.setAccessTime(ticker.read());
+    schedule(key.getAddTask());
   }
 
   /** Removes a resource that is no longer idle. */
   void invalidate(ResourceKey<K> key) {
-    schedule(new RemovalTask<K>(idleQueue, key));
+    schedule(key.getRemovalTask());
   }
 
   /** Schedules the task to be applied to the idle policy. */
   void schedule(Runnable task) {
-    taskQueue.add(task);
+    int index = taskQueueIndex();
+    taskQueues[index].add(task);
     cleanUp(AMORTIZED_THRESHOLD);
+  }
+
+  /** Returns the index to the task queue that the task should be scheduled on. */
+  static int taskQueueIndex() {
+    // A queue is chosen by the thread's id so that tasks are distributed in a pseudo evenly manner
+    return (int) Thread.currentThread().getId() & TASK_QUEUE_MASK;
   }
 
   /** Determines whether the resource has expired. */
@@ -100,12 +116,18 @@ final class TimeToIdlePolicy<K, R> {
   /** Applies the pending operations, up to the threshold limit, in the task queue. */
   @GuardedBy("idleLock")
   void drainTaskQueue(int threshold) {
-    for (int i = 0; i < threshold; i++) {
-      Runnable task = taskQueue.poll();
-      if (task == null) {
-        break;
+    int ran = 0;
+    for (Queue<Runnable> taskQueue : taskQueues) {
+      for (; ran < threshold; ran++) {
+        Runnable task = taskQueue.poll();
+        if (task == null) {
+          break;
+        }
+        task.run();
       }
-      task.run();
+      if (ran == threshold) {
+        return;
+      }
     }
   }
 
@@ -114,7 +136,7 @@ final class TimeToIdlePolicy<K, R> {
   void evict(int threshold) {
     long now = ticker.read();
     for (int i = 0; i < threshold; i++) {
-      ResourceKey<K> resourceKey = idleQueue.peek();
+      ResourceKey<K> resourceKey = idleQueue.peekFirst();
       if ((resourceKey == null) || !hasExpired(resourceKey, now)) {
         break;
       }
@@ -128,44 +150,5 @@ final class TimeToIdlePolicy<K, R> {
 
     /** A call-back notification that the entry was evicted. */
     void onEviction(ResourceKey<K> resourceKey);
-  }
-
-  /** Adds the available resource to the policy to be evaluated for expiration. */
-  static final class AddTask<K> implements Runnable {
-    final LinkedDeque<ResourceKey<K>> idleQueue;
-    final long accessTimeNanos;
-    final ResourceKey<K> key;
-
-    AddTask(LinkedDeque<ResourceKey<K>> idleQueue, ResourceKey<K> key, long accessTimeNanos) {
-      this.accessTimeNanos = accessTimeNanos;
-      this.idleQueue = idleQueue;
-      this.key = key;
-    }
-
-    @Override
-    @GuardedBy("idleLock")
-    public void run() {
-      if (key.getStatus() == Status.IDLE) {
-        key.setAccessTime(accessTimeNanos);
-        idleQueue.add(key);
-      }
-    }
-  }
-
-  /** Removes the resource from the policy, e.g. when borrowed or discarded by the pool. */
-  static final class RemovalTask<K> implements Runnable {
-    final LinkedDeque<ResourceKey<K>> idleQueue;
-    final ResourceKey<K> key;
-
-    RemovalTask(LinkedDeque<ResourceKey<K>> idleQueue, ResourceKey<K> key) {
-      this.idleQueue = idleQueue;
-      this.key = key;
-    }
-
-    @Override
-    @GuardedBy("idleLock")
-    public void run() {
-      idleQueue.remove(key);
-    }
   }
 }

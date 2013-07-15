@@ -20,6 +20,7 @@ import java.util.Collection;
 import java.util.Queue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -41,9 +42,10 @@ import static com.google.common.base.Preconditions.checkNotNull;
  * @author Ben Manes (ben@addepar.com)
  */
 public final class SingleThreadedBenchmark extends Benchmark {
-  static final int MASK = 15; // power-of-two
+  static final int MASK = 15; // power-of-two - 1
 
   LoadingMultiwayPool<Integer, Integer> multiway;
+  Callable<Integer> resourceLoader;
   @Param QueueType queueType;
 
   @Override
@@ -55,19 +57,27 @@ public final class SingleThreadedBenchmark extends Benchmark {
             return key;
           }
         });
+    resourceLoader = new Callable<Integer>() {
+      final Integer value = Integer.MAX_VALUE;
+
+      @Override
+      public Integer call() throws Exception {
+        return value;
+      }
+    };
   }
 
   public int timeBorrowAndRelease(int reps) {
     int dummy = 0;
     for (int i = 0; i < reps; i++) {
-      try (Handle<Integer> handle = multiway.borrow(i & MASK)) {
+      try (Handle<Integer> handle = multiway.borrow(i & MASK, resourceLoader)) {
         dummy += handle.get();
       }
     }
     return dummy;
   }
 
-  public static void main(String[] args) {
+  public static void main(String[] args) throws Exception {
     CaliperMain.main(SingleThreadedBenchmark.class, args);
   }
 
