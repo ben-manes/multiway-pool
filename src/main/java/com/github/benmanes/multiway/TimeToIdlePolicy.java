@@ -70,25 +70,19 @@ final class TimeToIdlePolicy<K, R> {
   /** Adds an idle resource to be tracked for expiration. */
   void add(ResourceKey<K> key) {
     key.setAccessTime(ticker.read());
-    schedule(key.getAddTask());
+    schedule(key, key.getAddTask());
   }
 
   /** Removes a resource that is no longer idle. */
   void invalidate(ResourceKey<K> key) {
-    schedule(key.getRemovalTask());
+    schedule(key, key.getRemovalTask());
   }
 
   /** Schedules the task to be applied to the idle policy. */
-  void schedule(Runnable task) {
-    int index = taskQueueIndex();
+  void schedule(ResourceKey<K> key, Runnable task) {
+    int index = key.hashCode() & TASK_QUEUE_MASK;
     taskQueues[index].add(task);
     cleanUp(AMORTIZED_THRESHOLD);
-  }
-
-  /** Returns the index to the task queue that the task should be scheduled on. */
-  static int taskQueueIndex() {
-    // A queue is chosen by the thread's id so that tasks are distributed in a pseudo evenly manner
-    return (int) Thread.currentThread().getId() & TASK_QUEUE_MASK;
   }
 
   /** Determines whether the resource has expired. */

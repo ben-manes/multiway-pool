@@ -542,8 +542,9 @@ public final class MultiwayPoolTest {
         throw new IllegalStateException();
       }
     };
+    getAndRelease(KEY_1);
     try {
-      multiway.timeToIdlePolicy.get().schedule(runner);
+      multiway.timeToIdlePolicy.get().schedule(getResourceKey(), runner);
       Assert.fail();
     } catch (IllegalStateException e) {
       assertThat(((ReentrantLock) multiway.timeToIdlePolicy.get().idleLock).isLocked(), is(false));
