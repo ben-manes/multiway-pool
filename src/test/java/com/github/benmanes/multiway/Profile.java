@@ -28,8 +28,8 @@ public final class Profile {
 
   public static void main(String[] args) throws Exception {
     final MultiwayPool<Integer, Integer> multiway = MultiwayPoolBuilder.newBuilder()
+        //.expireAfterAccess(1, TimeUnit.MINUTES)
         .maximumSize(100)
-        .expireAfterAccess(100, TimeUnit.NANOSECONDS)
         .build();
     final Callable<Integer> resourceLoader = new Callable<Integer>() {
       final Integer value = Integer.MAX_VALUE;
@@ -42,17 +42,16 @@ public final class Profile {
     ConcurrentTestHarness.timeTasks(25, new Runnable() {
       @Override
       public void run() {
-        Integer id = (int) Thread.currentThread().getId();
+        Integer id = 1;
         for (;;) {
-          try (Handle<Integer> handle = multiway.borrow(id, resourceLoader)) {
-            handle.get();
-          }
+          Integer resource = multiway.borrow(id, resourceLoader, 100, TimeUnit.MICROSECONDS);
+          multiway.release(resource, 100, TimeUnit.MICROSECONDS);
           yield();
         }
       }
       void yield() {
         Thread.yield();
-        LockSupport.parkNanos(1L);
+        LockSupport.parkNanos(250L);
       }
     });
   }

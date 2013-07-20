@@ -16,6 +16,7 @@
 package com.github.benmanes.multiway;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Queue;
@@ -32,11 +33,9 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import com.github.benmanes.multiway.ResourceKey.Status;
 import com.github.benmanes.multiway.TransferPool.LoadingTransferPool;
-import com.github.benmanes.multiway.TransferPool.ResourceHandle;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Supplier;
 import com.google.common.cache.Weigher;
-import com.google.common.collect.Lists;
 import com.google.common.testing.FakeTicker;
 import com.google.common.testing.GcFinalization;
 import org.testng.Assert;
@@ -85,9 +84,9 @@ public final class MultiwayPoolTest {
     ConcurrentTestHarness.timeTasks(numThreads, new Runnable() {
       @Override public void run() {
         for (int i = 0; i < iterations; i++) {
-          Handle<UUID> handle = multiway.borrow(KEY_1);
+          UUID resource = multiway.borrow(KEY_1);
           yield();
-          handle.release();
+          multiway.release(resource);
           yield();
         }
       }
@@ -112,11 +111,11 @@ public final class MultiwayPoolTest {
     assertThat(lifecycle.removals(), is(0));
   }
 
-  @Test(expectedExceptions = IllegalStateException.class)
-  public void borrow_badHandle() {
-    Handle<UUID> handle = multiway.borrow(KEY_1);
-    handle.release();
-    handle.get();
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void borrow_multipleReleases() {
+    UUID resource = multiway.borrow(KEY_1);
+    multiway.release(resource);
+    multiway.release(resource);
   }
 
   @Test
@@ -127,34 +126,33 @@ public final class MultiwayPoolTest {
     new Thread() {
       @Override public void run() {
         start.set(true);
-        Handle<UUID> handle = multiway.borrow(KEY_1, 1, TimeUnit.NANOSECONDS);
-        handle.release(1, TimeUnit.MINUTES);
+        UUID resource = multiway.borrow(KEY_1, 1, TimeUnit.NANOSECONDS);
+        multiway.release(resource, 1, TimeUnit.MINUTES);
         done.set(true);
       }
     }.start();
 
     await().untilTrue(start);
     assertThat(done.get(), is(false));
-    Handle<?> handle = multiway.borrow(KEY_1);
+    UUID resource = multiway.borrow(KEY_1);
     await().untilTrue(done);
-    handle.release();
+    multiway.release(resource);
 
     assertThat(stopwatch.elapsed(TimeUnit.MINUTES), is(0L));
   }
 
   @Test
   public void borrow_callable() {
-    MultiwayPool<Integer, UUID> pool = MultiwayPoolBuilder.newBuilder().build();
+    MultiwayPool<Integer, UUID> multiway = MultiwayPoolBuilder.newBuilder().build();
 
     final UUID expected = UUID.randomUUID();
-    Handle<UUID> handle = pool.borrow(KEY_1, new Callable<UUID>() {
+    UUID resource = multiway.borrow(KEY_1, new Callable<UUID>() {
       @Override public UUID call() throws Exception {
         return expected;
       }
     });
-    assertThat(handle.get(), is(expected));
-    handle.release();
-    pool.invalidateAll();
+    assertThat(resource, is(expected));
+    multiway.release(resource);
   }
 
   @Test
@@ -181,7 +179,7 @@ public final class MultiwayPoolTest {
 
   @Test
   public void evict_whenInFlight() {
-    Handle<?> handle = multiway.borrow(KEY_1);
+    UUID resource = multiway.borrow(KEY_1);
     ResourceKey<?> resourceKey = getResourceKey();
     assertThat(resourceKey.getStatus(), is(Status.IN_FLIGHT));
 
@@ -189,7 +187,7 @@ public final class MultiwayPoolTest {
     assertThat(multiway.size(), is(0L));
     assertThat(resourceKey.getStatus(), is(Status.RETIRED));
 
-    handle.release();
+    multiway.release(resource);
     assertThat(resourceKey.getStatus(), is(Status.DEAD));
   }
 
@@ -226,12 +224,12 @@ public final class MultiwayPoolTest {
   @Test
   public void evict_maximumSize() {
     multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder().maximumSize(10));
-    List<Handle<?>> handles = Lists.newArrayList();
+    List<UUID> resources = new ArrayList<>();
     for (int i = 0; i < 100; i++) {
-      handles.add(multiway.borrow(KEY_1));
+      resources.add(multiway.borrow(KEY_1));
     }
-    for (Handle<?> handle : handles) {
-      handle.release();
+    for (UUID resource : resources) {
+      multiway.release(resource);
     }
     assertThat(multiway.size(), is(10L));
     assertThat(lifecycle.borrows(), is(100));
@@ -247,12 +245,12 @@ public final class MultiwayPoolTest {
             return 5;
           }
         }));
-    List<Handle<?>> handles = Lists.newArrayList();
+    List<UUID> resources = new ArrayList<>();
     for (int i = 0; i < 100; i++) {
-      handles.add(multiway.borrow(KEY_1));
+      resources.add(multiway.borrow(KEY_1));
     }
-    for (Handle<?> handle : handles) {
-      handle.release();
+    for (UUID resource : resources) {
+      multiway.release(resource);
     }
     assertThat(multiway.size(), is(2L));
     assertThat(lifecycle.borrows(), is(100));
@@ -264,12 +262,12 @@ public final class MultiwayPoolTest {
   public void evict_expireAfterAccess() {
     multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
         .ticker(ticker).expireAfterAccess(1, TimeUnit.MINUTES));
-    List<Handle<?>> handles = Lists.newArrayList();
+    List<UUID> resources = new ArrayList<>();
     for (int i = 0; i < 100; i++) {
-      handles.add(multiway.borrow(KEY_1));
+      resources.add(multiway.borrow(KEY_1));
     }
-    for (Handle<?> handle : handles) {
-      handle.release();
+    for (UUID resource : resources) {
+      multiway.release(resource);
     }
     ticker.advance(10, TimeUnit.MINUTES);
     multiway.cleanUp();
@@ -284,12 +282,12 @@ public final class MultiwayPoolTest {
   public void evict_expireAfterWrite() {
     multiway = makeMultiwayPool(MultiwayPoolBuilder.newBuilder()
         .ticker(ticker).expireAfterWrite(1, TimeUnit.MINUTES));
-    List<Handle<?>> handles = Lists.newArrayList();
+    List<UUID> resources = new ArrayList<>();
     for (int i = 0; i < 100; i++) {
-      handles.add(multiway.borrow(KEY_1));
+      resources.add(multiway.borrow(KEY_1));
     }
-    for (Handle<?> handle : handles) {
-      handle.release();
+    for (UUID resource : resources) {
+      multiway.release(resource);
     }
     ticker.advance(10, TimeUnit.MINUTES);
     multiway.cleanUp();
@@ -302,15 +300,16 @@ public final class MultiwayPoolTest {
 
   @Test
   public void release_toPool() {
-    @SuppressWarnings("rawtypes")
-    ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);
+    UUID resource = multiway.borrow(KEY_1);
     assertThat(multiway.size(), is(1L));
     assertThat(lifecycle.borrows(), is(1));
     assertThat(lifecycle.releases(), is(0));
     assertThat(lifecycle.removals(), is(0));
+
+    TransferPool<Integer, UUID>.ResourceHandle handle = multiway.inFlight.get().get(resource);
     assertThat(handle.resourceKey.getStatus(), is(Status.IN_FLIGHT));
 
-    handle.release();
+    multiway.release(resource);
     assertThat(multiway.size(), is(1L));
     assertThat(lifecycle.releases(), is(1));
     assertThat(lifecycle.removals(), is(0));
@@ -319,8 +318,8 @@ public final class MultiwayPoolTest {
 
   @Test
   public void release_andDiscard() {
-    @SuppressWarnings("rawtypes")
-    ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);
+    UUID resource = multiway.borrow(KEY_1);
+    TransferPool<Integer, UUID>.ResourceHandle handle = multiway.inFlight.get().get(resource);
 
     multiway.invalidateAll();
     assertThat(multiway.size(), is(0L));
@@ -329,7 +328,7 @@ public final class MultiwayPoolTest {
     assertThat(lifecycle.removals(), is(0));
     assertThat(handle.resourceKey.getStatus(), is(Status.RETIRED));
 
-    handle.release();
+    multiway.release(resource);
     assertThat(lifecycle.releases(), is(1));
     assertThat(lifecycle.removals(), is(1));
     assertThat(handle.resourceKey.getStatus(), is(Status.DEAD));
@@ -337,15 +336,15 @@ public final class MultiwayPoolTest {
 
   @Test
   public void invalidate_whenInFlight() {
-    @SuppressWarnings("rawtypes")
-    ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);
+    UUID resource = multiway.borrow(KEY_1);
+    TransferPool<Integer, UUID>.ResourceHandle handle = multiway.inFlight.get().get(resource);
     assertThat(multiway.size(), is(1L));
     assertThat(lifecycle.borrows(), is(1));
     assertThat(lifecycle.releases(), is(0));
     assertThat(lifecycle.removals(), is(0));
     assertThat(handle.resourceKey.getStatus(), is(Status.IN_FLIGHT));
 
-    handle.invalidate();
+    multiway.releaseAndInvalidate(resource);
     assertThat(multiway.size(), is(0L));
     assertThat(lifecycle.releases(), is(1));
     assertThat(lifecycle.removals(), is(1));
@@ -354,8 +353,8 @@ public final class MultiwayPoolTest {
 
   @Test
   public void invalidate_whenRetired() {
-    @SuppressWarnings("rawtypes")
-    ResourceHandle handle = (ResourceHandle) multiway.borrow(KEY_1);
+    UUID resource = multiway.borrow(KEY_1);
+    TransferPool<Integer, UUID>.ResourceHandle handle = multiway.inFlight.get().get(resource);
     multiway.invalidateAll();
 
     assertThat(multiway.size(), is(0L));
@@ -364,7 +363,7 @@ public final class MultiwayPoolTest {
     assertThat(lifecycle.removals(), is(0));
     assertThat(handle.resourceKey.getStatus(), is(Status.RETIRED));
 
-    handle.invalidate();
+    multiway.releaseAndInvalidate(resource);
     assertThat(multiway.size(), is(0L));
     assertThat(lifecycle.releases(), is(1));
     assertThat(lifecycle.removals(), is(1));
@@ -372,21 +371,12 @@ public final class MultiwayPoolTest {
   }
 
   @Test
-  public void tryWithResources() {
-    try (Handle<UUID> handle = multiway.borrow(KEY_1)) {
-      assertThat(getResourceKey().getStatus(), is(Status.IN_FLIGHT));
-    }
-    assertThat(getResourceKey().getStatus(), is(Status.IDLE));
-  }
-
-  @Test
   public void discardPool() {
-    Handle<UUID> handle = multiway.borrow(KEY_1);
+    UUID resource = multiway.borrow(KEY_1);
     GcFinalization.awaitFullGc();
     assertThat(multiway.transferQueues.size(), is(1L));
 
-    handle.release();
-    handle = null;
+    multiway.release(resource);
     multiway.invalidateAll();
 
     GcFinalization.awaitFullGc();
@@ -524,9 +514,9 @@ public final class MultiwayPoolTest {
             throw new UnsupportedOperationException();
           }
         }));
-    Handle<UUID> handle = multiway.borrow(KEY_1);
+    UUID resource = multiway.borrow(KEY_1);
     try {
-      handle.invalidate();
+      multiway.releaseAndInvalidate(resource);
       Assert.fail();
     } catch (UnsupportedOperationException e) {
       assertThat(multiway.size(), is(0L));
@@ -566,8 +556,8 @@ public final class MultiwayPoolTest {
       getAndRelease(i);
     }
     for (int i = 0; i < 10; i++) {
-      Handle<UUID> handle = multiway.borrow(5, 1, TimeUnit.MINUTES);
-      handle.release(1, TimeUnit.MINUTES);
+      UUID resource = multiway.borrow(5, 1, TimeUnit.MINUTES);
+      multiway.release(resource, 1, TimeUnit.MINUTES);
     }
     assertThat(queues.get(), is(10));
     assertThat(multiway.size(), is(10L));
@@ -585,23 +575,23 @@ public final class MultiwayPoolTest {
 
       @Override
       public void run() {
-        Deque<Handle<?>> handles = new ArrayDeque<>();
+        Deque<UUID> resources = new ArrayDeque<>();
         for (int i = 0; i < 100; i++) {
-          execute(handles, i);
+          execute(resources, i);
           yield();
         }
-        for (Handle<?> handle : handles) {
-          handle.release();
+        for (UUID resource : resources) {
+          multiway.release(resource);
         }
       }
 
-      void execute(Deque<Handle<?>> handles, int key) {
+      void execute(Deque<UUID> resources, int key) {
         if (random.nextBoolean()) {
-          Handle<?> handle = multiway.borrow(key);
-          handles.add(handle);
-        } else if (!handles.isEmpty()) {
-          Handle<?> handle = handles.remove();
-          handle.release();
+          UUID resource = multiway.borrow(key);
+          resources.add(resource);
+        } else if (!resources.isEmpty()) {
+          UUID resource = resources.remove();
+          multiway.release(resource);
         }
       }
     });
@@ -620,9 +610,8 @@ public final class MultiwayPoolTest {
   }
 
   private UUID getAndRelease(Integer key) {
-    Handle<UUID> handle = multiway.borrow(key);
-    UUID resource = handle.get();
-    handle.release();
+    UUID resource = multiway.borrow(key);
+    multiway.release(resource);
     return resource;
   }
 

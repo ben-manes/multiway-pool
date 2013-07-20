@@ -52,6 +52,8 @@ abstract class ResourceKey<K> extends AtomicReference<Status> implements Linked<
   final K key;
   final TransferQueue<ResourceKey<K>> queue;
 
+  Object handle;
+
   ResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key) {
     super(status);
     this.key = key;

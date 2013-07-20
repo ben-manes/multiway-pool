@@ -70,9 +70,8 @@ public final class SingleThreadedBenchmark extends Benchmark {
   public int timeBorrowAndRelease(int reps) {
     int dummy = 0;
     for (int i = 0; i < reps; i++) {
-      try (Handle<Integer> handle = multiway.borrow(i & MASK, resourceLoader)) {
-        dummy += handle.get();
-      }
+      Integer resource = multiway.borrow(i & MASK, resourceLoader);
+      multiway.release(resource);
     }
     return dummy;
   }

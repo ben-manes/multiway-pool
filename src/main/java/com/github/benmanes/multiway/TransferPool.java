@@ -16,6 +16,7 @@
 package com.github.benmanes.multiway;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
@@ -30,7 +31,6 @@ import com.github.benmanes.multiway.ResourceKey.LinkedResourceKey;
 import com.github.benmanes.multiway.ResourceKey.Status;
 import com.github.benmanes.multiway.ResourceKey.UnlinkedResourceKey;
 import com.github.benmanes.multiway.TimeToIdlePolicy.EvictionListener;
-import com.google.common.base.Objects;
 import com.google.common.base.Optional;
 import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
@@ -48,6 +48,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.ForwardingBlockingQueue;
 import com.google.common.util.concurrent.Uninterruptibles;
+import it.unimi.dsi.fastutil.objects.Reference2ReferenceOpenHashMap;
 
 import static com.github.benmanes.multiway.TimeToIdlePolicy.AMORTIZED_THRESHOLD;
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -90,6 +91,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   final ResourceLifecycle<? super K, ? super R> lifecycle;
   final Optional<TimeToIdlePolicy<K, R>> timeToIdlePolicy;
   final Supplier<BlockingQueue<Object>> queueSupplier;
+  final ThreadLocal<Map<R, ResourceHandle>> inFlight;
   final Cache<ResourceKey<K>, R> cache;
   final Ticker ticker;
 
@@ -100,6 +102,11 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     queueSupplier = builder.getQueueSupplier();
     ticker = builder.getTicker();
     cache = makeCache(builder);
+    inFlight = new ThreadLocal<Map<R, ResourceHandle>>() {
+      @Override protected Map<R, ResourceHandle> initialValue() {
+        return new Reference2ReferenceOpenHashMap<>();
+      }
+    };
   }
 
   /** Creates a mapping from the resource category to its transfer queue of available keys. */
@@ -160,12 +167,12 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   }
 
   @Override
-  public Handle<R> borrow(K key, Callable<? extends R> loader) {
+  public R borrow(K key, Callable<? extends R> loader) {
     return borrow(key, loader, 0, TimeUnit.NANOSECONDS);
   }
 
   @Override
-  public Handle<R> borrow(K key, Callable<? extends R> loader, long timeout, TimeUnit unit) {
+  public R borrow(K key, Callable<? extends R> loader, long timeout, TimeUnit unit) {
     checkNotNull(key);
     checkNotNull(unit);
     checkNotNull(loader);
@@ -174,9 +181,10 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     if (timeToIdlePolicy.isPresent()) {
       timeToIdlePolicy.get().invalidate(handle.resourceKey);
     }
+    inFlight.get().put(handle.resource, handle);
     try {
       lifecycle.onBorrow(key, handle.resource);
-      return handle;
+      return handle.resource;
     } catch (Exception e) {
       handle.invalidate();
       throw e;
@@ -244,25 +252,54 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
           }
         }
       });
-      return new ResourceHandle(resourceKey, resource);
+      ResourceHandle handle = new ResourceHandle(resourceKey, resource);
+      resourceKey.handle = handle;
+      return handle;
     } catch (ExecutionException e) {
       throw Throwables.propagate(e.getCause());
     }
   }
 
   /** Attempts to get the pooled resource with the given key. */
+  @SuppressWarnings("unchecked")
   @Nullable ResourceHandle tryToGetPooledResourceHandle(ResourceKey<K> resourceKey) {
     R resource = cache.getIfPresent(resourceKey);
     if (resource == null) {
       return null;
     }
     return (resourceKey.getStatus() == Status.IDLE) && resourceKey.goFromIdleToInFlight()
-        ? new ResourceHandle(resourceKey, resource)
+        ? (ResourceHandle) resourceKey.handle
         : null;
   }
 
   @Override
-  public void invalidate(Object key) {
+  public void release(R resource) {
+    ResourceHandle handle = getInFlightHandle(resource);
+    handle.release();
+  }
+
+  @Override
+  public void release(R resource, long timeout, TimeUnit unit) {
+    ResourceHandle handle = getInFlightHandle(resource);
+    handle.release(timeout, unit);
+  }
+
+  @Override
+  public void releaseAndInvalidate(R resource) {
+    ResourceHandle handle = getInFlightHandle(resource);
+    handle.invalidate();
+  }
+
+  private ResourceHandle getInFlightHandle(R resource) {
+    ResourceHandle handle = inFlight.get().remove(resource);
+    if (handle == null) {
+      throw new IllegalArgumentException("The resource was not borrowed");
+    }
+    return handle;
+  }
+
+  @Override
+  public void invalidate(K key) {
     checkNotNull(key);
 
     List<ResourceKey<K>> resourceKeys = Lists.newArrayList();
@@ -318,12 +355,12 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     }
 
     @Override
-    public Handle<R> borrow(K key) {
+    public R borrow(K key) {
       return borrow(key, 0L, TimeUnit.NANOSECONDS);
     }
 
     @Override
-    public Handle<R> borrow(final K key, long timeout, TimeUnit unit) {
+    public R borrow(final K key, long timeout, TimeUnit unit) {
       Callable<R> callable = new Callable<R>() {
         @Override public R call() throws Exception {
           return loader.load(key);
@@ -334,34 +371,20 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   }
 
   /** A handle to a resource in the cache. */
-  final class ResourceHandle implements Handle<R> {
+  final class ResourceHandle {
     final ResourceKey<K> resourceKey;
-    @Nullable R resource;
+    R resource;
 
     ResourceHandle(ResourceKey<K> resourceKey, R resource) {
       this.resourceKey = resourceKey;
       this.resource = resource;
     }
 
-    @Override
-    public R get() {
-      validate();
-      return resource;
-    }
-
-    @Override
-    public void close() {
-      release();
-    }
-
-    @Override
     public void release() {
       release(0L, TimeUnit.NANOSECONDS);
     }
 
-    @Override
     public void release(long timeout, TimeUnit unit) {
-      validate();
       try {
         lifecycle.onRelease(resourceKey.getKey(), resource);
       } catch (Exception e) {
@@ -372,21 +395,12 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       }
     }
 
-    @Override
     public void invalidate() {
-      validate();
       try {
         lifecycle.onRelease(resourceKey.getKey(), resource);
       } finally {
         cache.invalidate(resourceKey);
         recycle(0L, TimeUnit.NANOSECONDS);
-      }
-    }
-
-    /** Ensures that the handle can be manipulated by the user. */
-    void validate() {
-      if (resource == null) {
-        throw new IllegalStateException("Stale handle to the resource for " + resourceKey.getKey());
       }
     }
 
@@ -417,7 +431,6 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     void releaseToPool(long timeout, TimeUnit unit) {
       registerAsIdle();
       offerToPool(timeout, unit);
-      resource = null;
     }
 
     /**
@@ -454,17 +467,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     /** Discards the resource after it has become dead. */
     void discardResource() {
       R old = resource;
-      resource = null;
       lifecycle.onRemoval(resourceKey.getKey(), old);
-    }
-
-    @Override
-    public String toString() {
-      return Objects.toStringHelper(this)
-          .add("status", resourceKey.getStatus())
-          .add("key", resourceKey.getKey())
-          .add("resource", resource)
-          .toString();
     }
   }
 

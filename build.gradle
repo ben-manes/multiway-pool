@@ -20,6 +20,7 @@ repositories {
 dependencies {
   def guava = '14.0.1'
 
+  compile 'it.unimi.dsi:fastutil:6.5.6'
   compile "com.google.guava:guava:${guava}"
   compile 'com.google.code.findbugs:jsr305:2.0.1'
 

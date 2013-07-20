@@ -52,9 +52,9 @@ public interface MultiwayPool<K, R> {
    *
    * @param key the category to qualify the type of resource to retrieve
    * @param loader a loader that creates a non-null resource
-   * @return a handle to the resource
+   * @return a resource which must be returned after use
    */
-  Handle<R> borrow(K key, Callable<? extends R> loader);
+  R borrow(K key, Callable<? extends R> loader);
 
   /**
    * Retrieves a resource from the pool, waiting up to the specified wait time if necessary for one
@@ -64,15 +64,45 @@ public interface MultiwayPool<K, R> {
    * @param loader a loader that creates a non-null resource
    * @param timeout how long to wait before giving up and creating the resource
    * @param unit a {@code TimeUnit} determining how to interpret the {@code duration} parameter
-   * @return a handle to the resource
+   * @return a resource which must be returned after use
    */
-  Handle<R> borrow(K key, Callable<? extends R> loader, long timeout, TimeUnit unit);
+  R borrow(K key, Callable<? extends R> loader, long timeout, TimeUnit unit);
+
+  /**
+   * Returns the resource to the object pool. If the resource has been evicted by the pool, it
+   * is immediately discarded. Otherwise the resource is available to be borrowed from the pool.
+   *
+   * @param resource the resource to return to the pool
+   * @throws IllegalStateException if the resource was not borrowed
+   */
+  void release(R resource);
+
+  /**
+   * Returns the resource to the object pool, waiting up to the specified wait time to exchange it
+   * with a consumer. If the resource has been evicted by the pool, it is immediately discarded.
+   * Otherwise the resource is available to be borrowed from the pool if an exchange was not
+   * successful.
+   *
+   * @param timeout how long to wait for an exchange before giving up and releasing to the pool
+   * @param unit a {@code TimeUnit} determining how to interpret the {@code duration} parameter
+   * @param resource the resource to return to the pool
+   * @throws IllegalStateException if the resource was borrowed
+   */
+  void release(R resource, long timeout, TimeUnit unit);
+
+  /**
+   * Returns the resource to the object pool to be immediately discarded.
+   *
+   * @param resource the resource to return to the pool
+   * @throws IllegalStateException if the resource was not borrowed
+   */
+  void releaseAndInvalidate(R resource);
 
   /**
    * Discards any pooled resource associated with the {@code key}. Any resource currently in use
    * will be immediately discarded upon release.
    */
-  void invalidate(Object key);
+  void invalidate(K key);
 
   /**
    * Discards all resources in the pool. Any resource currently in use will be immediately

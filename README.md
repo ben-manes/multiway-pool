@@ -23,11 +23,10 @@ LoadingMultiwayPool<String, Connection> pool = MultiwayPoolBuilder.newBuilder()
       }
     });
 
-Handle<Connection> handle = pool.borrow("master");
+Connection connection = pool.borrow("master");
 try {
-  Connection connection = handle.get();
   // use connection...
 } finally {
-  handle.release();
+  pool.release(connection);
 }
 ```

@@ -32,9 +32,9 @@ public interface LoadingMultiwayPool<K, R> extends MultiwayPool<K, R> {
    * created.
    *
    * @param key the category to qualify the type of resource to retrieve
-   * @return a handle to the resource
+   * @return a resource which must be returned after use
    */
-  Handle<R> borrow(K key);
+  R borrow(K key);
 
   /**
    * Retrieves a resource from the pool, waiting up to the specified wait time if necessary for one
@@ -43,7 +43,7 @@ public interface LoadingMultiwayPool<K, R> extends MultiwayPool<K, R> {
    * @param key the category to qualify the type of resource to retrieve
    * @param timeout how long to wait before giving up and creating the resource
    * @param unit a {@code TimeUnit} determining how to interpret the {@code duration} parameter
-   * @return a handle to the resource
+   * @return a resource which must be returned after use
    */
-  Handle<R> borrow(K key, long timeout, TimeUnit unit);
+  R borrow(K key, long timeout, TimeUnit unit);
 }
