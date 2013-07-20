@@ -24,6 +24,7 @@ dependencies {
   compile "com.google.guava:guava:${guava}"
   compile 'com.google.code.findbugs:jsr305:2.0.1'
 
+  testCompile 'com.twitter:jsr166e:1.0.0'
   testCompile 'org.hamcrest:hamcrest-all:1.3'
   testCompile 'com.sun.jersey:jersey-bundle:1.17.1'
   testCompile 'com.google.caliper:caliper:1.0-beta-1'
@@ -87,7 +88,22 @@ task wrapper(type: Wrapper, description: 'Generates the gradle wrapper.') {
 
 task singleThreadBenchmark(dependsOn: 'testClasses', type: JavaExec) {
   maxHeapSize = '512m'
-  args = ['--print-config']
+  args = ['--print-config', '-v']
   classpath = sourceSets.test.runtimeClasspath
   main = 'com.github.benmanes.multiway.SingleThreadedBenchmark'
 }
+
+task collectionBenchmark(dependsOn: 'testClasses', type: JavaExec) {
+  maxHeapSize = '512m'
+  args = ['--print-config', '-v']
+  classpath = sourceSets.test.runtimeClasspath
+  main = 'com.github.benmanes.multiway.CollectionBenchmark'
+}
+
+task startIndexBenchmark(dependsOn: 'testClasses', type: JavaExec) {
+  maxHeapSize = '512m'
+  args = ['--print-config', '-v']
+  classpath = sourceSets.test.runtimeClasspath
+  main = 'com.github.benmanes.multiway.StartIndexBenchmark'
+}
+

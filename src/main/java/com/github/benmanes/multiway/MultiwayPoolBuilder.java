@@ -15,14 +15,10 @@
  */
 package com.github.benmanes.multiway;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TransferQueue;
 
 import com.github.benmanes.multiway.TransferPool.LoadingTransferPool;
 import com.google.common.base.Objects;
-import com.google.common.base.Supplier;
 import com.google.common.base.Ticker;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheStats;
@@ -56,12 +52,6 @@ import static com.google.common.base.Preconditions.checkState;
 public final class MultiwayPoolBuilder<K, R> {
   static final ResourceLifecycle<Object, Object> DISCARDING_LIFECYCLE =
       new ResourceLifecycle<Object, Object>() {};
-  static final Supplier<BlockingQueue<Object>> LTQ_SUPPLIER =
-      new Supplier<BlockingQueue<Object>>() {
-        @Override public BlockingQueue<Object> get() {
-          return new LinkedTransferQueue<Object>();
-        }
-      };
   static final int DEFAULT_CONCURRENCY_LEVEL = 4;
   static final int UNSET_INT = -1;
 
@@ -76,17 +66,12 @@ public final class MultiwayPoolBuilder<K, R> {
   long expireAfterAccessNanos = UNSET_INT;
 
   int concurrencyLevel = UNSET_INT;
-  Supplier<BlockingQueue<Object>> queueSupplier;
   ResourceLifecycle<? super K, ? super R> lifecycle;
 
   MultiwayPoolBuilder() {}
 
   Ticker getTicker() {
     return Objects.firstNonNull(ticker, Ticker.systemTicker());
-  }
-
-  Supplier<BlockingQueue<Object>> getQueueSupplier() {
-    return Objects.firstNonNull(queueSupplier, LTQ_SUPPLIER);
   }
 
   @SuppressWarnings("unchecked")
@@ -274,20 +259,6 @@ public final class MultiwayPoolBuilder<K, R> {
   }
 
   /**
-   * Specifies the supplier used for creating the queue per resource type. The queue holds the idle
-   * resources in the pool, being polled when borrowing and added to when releasing. If the queue
-   * implements {@link TransferQueue} additional optimizations are used to exchange resources
-   * efficiently.
-   *
-   * @param queueSupplier the supplier of a new empty queue
-   */
-  public MultiwayPoolBuilder<K, R> queueSupplier(Supplier<BlockingQueue<Object>> queueSupplier) {
-    checkState(this.queueSupplier == null);
-    this.queueSupplier = checkNotNull(queueSupplier);
-    return this;
-  }
-
-  /**
    * Builds a multiway pool, which either returns an available resource for a given key or
    * atomically computes or retrieves it using the method supplied {@code Callable}.
    *
@@ -331,9 +302,6 @@ public final class MultiwayPoolBuilder<K, R> {
     }
     if (lifecycle != null) {
       s.addValue("resourceLifecycle");
-    }
-    if (queueSupplier != null) {
-      s.addValue("queueSupplier");
     }
     return s.toString();
   }

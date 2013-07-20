@@ -18,11 +18,9 @@ package com.github.benmanes.multiway;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TransferQueue;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
@@ -32,7 +30,6 @@ import com.github.benmanes.multiway.ResourceKey.Status;
 import com.github.benmanes.multiway.ResourceKey.UnlinkedResourceKey;
 import com.github.benmanes.multiway.TimeToIdlePolicy.EvictionListener;
 import com.google.common.base.Optional;
-import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
 import com.google.common.base.Ticker;
 import com.google.common.cache.Cache;
@@ -46,13 +43,10 @@ import com.google.common.cache.Weigher;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
-import com.google.common.util.concurrent.ForwardingBlockingQueue;
-import com.google.common.util.concurrent.Uninterruptibles;
 import it.unimi.dsi.fastutil.objects.Reference2ReferenceOpenHashMap;
 
 import static com.github.benmanes.multiway.TimeToIdlePolicy.AMORTIZED_THRESHOLD;
 import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkState;
 
 /**
  * A concurrent {@link MultiwayPool} that is optimized around transferring resources between threads
@@ -87,19 +81,17 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
    * referencing to the queue then the garbage collector will eagerly discard the transfer queue.
    */
 
-  final LoadingCache<K, TransferQueue<ResourceKey<K>>> transferQueues;
+  final LoadingCache<K, EliminationStack<ResourceKey<K>>> transferStacks;
   final ResourceLifecycle<? super K, ? super R> lifecycle;
   final Optional<TimeToIdlePolicy<K, R>> timeToIdlePolicy;
-  final Supplier<BlockingQueue<Object>> queueSupplier;
   final ThreadLocal<Map<R, ResourceHandle>> inFlight;
   final Cache<ResourceKey<K>, R> cache;
   final Ticker ticker;
 
   TransferPool(MultiwayPoolBuilder<? super K, ? super R> builder) {
-    transferQueues = makeTransferQueues(builder.getConcurrencyLevel());
+    transferStacks = makeTransferStacks(builder.getConcurrencyLevel());
     timeToIdlePolicy = makeTimeToIdlePolicy(builder);
     lifecycle = builder.getResourceLifecycle();
-    queueSupplier = builder.getQueueSupplier();
     ticker = builder.getTicker();
     cache = makeCache(builder);
     inFlight = new ThreadLocal<Map<R, ResourceHandle>>() {
@@ -109,17 +101,12 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     };
   }
 
-  /** Creates a mapping from the resource category to its transfer queue of available keys. */
-  LoadingCache<K, TransferQueue<ResourceKey<K>>> makeTransferQueues(int concurrencyLevel) {
+  /** Creates a mapping from the resource category to its transfer stack of available keys. */
+  LoadingCache<K, EliminationStack<ResourceKey<K>>> makeTransferStacks(int concurrencyLevel) {
     return CacheBuilder.newBuilder().concurrencyLevel(concurrencyLevel).weakValues().build(
-        new CacheLoader<K, TransferQueue<ResourceKey<K>>>() {
-          @SuppressWarnings("unchecked")
-          @Override public TransferQueue<ResourceKey<K>> load(K key) throws Exception {
-            BlockingQueue<?> queue = queueSupplier.get();
-            checkState(queue.isEmpty(), "Supplied queue must be empty");
-            return (queue instanceof TransferQueue<?>)
-                ? (TransferQueue<ResourceKey<K>>) queue
-                : new TransferQueueAdapter<>((BlockingQueue<ResourceKey<K>>) queue);
+        new CacheLoader<K, EliminationStack<ResourceKey<K>>>() {
+          @Override public EliminationStack<ResourceKey<K>> load(K key) throws Exception {
+            return new EliminationStack<>();
           }
         });
   }
@@ -194,12 +181,12 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   /** Retrieves the next available handler, creating the resource if necessary. */
   ResourceHandle getResourceHandle(K key,
       Callable<? extends R> loader, long timeout, TimeUnit unit) {
-    TransferQueue<ResourceKey<K>> queue = transferQueues.getUnchecked(key);
+    EliminationStack<ResourceKey<K>> stack = transferStacks.getUnchecked(key);
     long timeoutNanos = unit.toNanos(timeout);
     long startNanos = ticker.read();
     boolean hasCleanedUp = false;
     for (;;) {
-      ResourceHandle handle = tryToGetResourceHandle(key, loader, queue, timeoutNanos);
+      ResourceHandle handle = tryToGetResourceHandle(key, loader, stack, timeoutNanos);
       if (handle == null) {
         if (timeToIdlePolicy.isPresent() && !hasCleanedUp) {
           timeToIdlePolicy.get().cleanUp(AMORTIZED_THRESHOLD);
@@ -215,31 +202,25 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
 
   /** Attempts to retrieves the next available handler, creating the resource if necessary. */
   @Nullable ResourceHandle tryToGetResourceHandle(K key, Callable<? extends R> loader,
-      TransferQueue<ResourceKey<K>> queue, long timeoutNanos) {
-    try {
-      ResourceKey<K> resourceKey = (timeoutNanos == 0)
-          ? queue.poll()
-          : queue.poll(timeoutNanos, TimeUnit.NANOSECONDS);
-      if (resourceKey == null) {
-        return newResourceHandle(key, loader, queue);
-      }
-      if (timeToIdlePolicy.isPresent() && timeToIdlePolicy.get().hasExpired(resourceKey)) {
-        // Retry with another resource due to idle expiration
-        return null;
-      }
-      return tryToGetPooledResourceHandle(resourceKey);
-    } catch (InterruptedException e) {
-      throw Throwables.propagate(e);
+      EliminationStack<ResourceKey<K>> stack, long timeoutNanos) {
+    ResourceKey<K> resourceKey = stack.pop();
+    if (resourceKey == null) {
+      return newResourceHandle(key, loader, stack);
     }
+    if (timeToIdlePolicy.isPresent() && timeToIdlePolicy.get().hasExpired(resourceKey)) {
+      // Retry with another resource due to idle expiration
+      return null;
+    }
+    return tryToGetPooledResourceHandle(resourceKey);
   }
 
-  /** Creates a new resource associated to the category key and queue. */
+  /** Creates a new resource associated to the category key and stack. */
   ResourceHandle newResourceHandle(K key, final Callable<? extends R> loader,
-      TransferQueue<ResourceKey<K>> queue) {
+      EliminationStack<ResourceKey<K>> stack) {
     try {
       final ResourceKey<K> resourceKey = timeToIdlePolicy.isPresent()
-          ? new LinkedResourceKey<K>(queue, Status.IN_FLIGHT, key, timeToIdlePolicy.get().idleQueue)
-          : new UnlinkedResourceKey<K>(queue, Status.IN_FLIGHT, key);
+          ? new LinkedResourceKey<K>(stack, Status.IN_FLIGHT, key, timeToIdlePolicy.get().idleQueue)
+          : new UnlinkedResourceKey<K>(stack, Status.IN_FLIGHT, key);
       R resource = cache.get(resourceKey, new Callable<R>() {
         @Override public R call() throws Exception {
           R resource = loader.call();
@@ -446,21 +427,12 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       }
     }
 
-    /** Attempt to transfer the resource to another thread, else return it to the queue. */
+    /** Attempt to transfer the resource to another thread, else return it to the stack. */
     void offerToPool(long timeout, TimeUnit unit) {
-      TransferQueue<ResourceKey<K>> queue = resourceKey.getQueue();
-      try {
-        boolean transferred = (timeout == 0)
-            ? queue.tryTransfer(resourceKey)
-            : queue.tryTransfer(resourceKey, timeout, unit);
-        if (!transferred) {
-          queue.put(resourceKey);
-        }
-      } catch (InterruptedException e) {
-        Uninterruptibles.putUninterruptibly(queue, resourceKey);
-      }
+      EliminationStack<ResourceKey<K>> stack = resourceKey.getStack();
+      stack.push(resourceKey);
       if (resourceKey.getStatus() == Status.DEAD) {
-        resourceKey.removeFromTransferQueue();
+        resourceKey.removeFromTransferStack();
       }
     }
 
@@ -513,7 +485,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
 
     /** Discards the resource after becoming dead from the idle state. */
     void discardFromIdle(ResourceKey<K> resourceKey, R resource) {
-      resourceKey.removeFromTransferQueue();
+      resourceKey.removeFromTransferStack();
       if (timeToIdlePolicy.isPresent()) {
         timeToIdlePolicy.get().invalidate(resourceKey);
       }
@@ -522,7 +494,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
 
     /** Discards the resource after becoming dead from the retired state. */
     void discardFromRetired(ResourceKey<K> resourceKey, R resource) {
-      resourceKey.removeFromTransferQueue();
+      resourceKey.removeFromTransferStack();
       lifecycle.onRemoval(resourceKey.getKey(), resource);
     }
   }
@@ -550,46 +522,6 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
             return;
         }
       }
-    }
-  }
-
-  /** Adapts a {@link BlockingQueue} to the {@link TransferQueue} interface. */
-  static final class TransferQueueAdapter<E> extends ForwardingBlockingQueue<E>
-      implements TransferQueue<E> {
-    final BlockingQueue<E> delegate;
-
-    TransferQueueAdapter(BlockingQueue<E> delegate) {
-      this.delegate = checkNotNull(delegate);
-    }
-
-    @Override
-    public boolean tryTransfer(E e) {
-      return false;
-    }
-
-    @Override
-    public void transfer(E e) throws InterruptedException {
-      delegate.put(e);
-    }
-
-    @Override
-    public boolean tryTransfer(E e, long timeout, TimeUnit unit) throws InterruptedException {
-      return delegate.offer(e, timeout, unit);
-    }
-
-    @Override
-    public boolean hasWaitingConsumer() {
-      return false;
-    }
-
-    @Override
-    public int getWaitingConsumerCount() {
-      return 0;
-    }
-
-    @Override
-    protected BlockingQueue<E> delegate() {
-      return delegate;
     }
   }
 }

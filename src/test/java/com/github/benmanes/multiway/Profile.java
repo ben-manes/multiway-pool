@@ -16,42 +16,48 @@
 package com.github.benmanes.multiway;
 
 import java.util.concurrent.Callable;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.LockSupport;
+
+import com.google.common.base.Stopwatch;
+import com.twitter.jsr166e.LongAdder;
 
 /**
  * A simple bootstrap for inspecting with an attached profiler.
  *
- * @author Ben Manes (ben@addepar.com)
+ * @author Ben Manes (ben.manes@gmail.com)
  */
 public final class Profile {
+  static final int DISPLAY_DELAY_SEC = 5;
 
   public static void main(String[] args) throws Exception {
     final MultiwayPool<Integer, Integer> multiway = MultiwayPoolBuilder.newBuilder()
-        //.expireAfterAccess(1, TimeUnit.MINUTES)
+        //.expireAfterAccess(2, TimeUnit.MINUTES)
         .maximumSize(100)
         .build();
     final Callable<Integer> resourceLoader = new Callable<Integer>() {
-      final Integer value = Integer.MAX_VALUE;
-
-      @Override
-      public Integer call() throws Exception {
-        return value;
+      @Override public Integer call() throws Exception {
+        return Integer.MAX_VALUE;
       }
     };
+
+    final LongAdder calls = new LongAdder();
+    Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(new Runnable() {
+      final Stopwatch stopwatch = new Stopwatch().start();
+      @Override public void run() {
+        long count = calls.longValue();
+        long rate = count / stopwatch.elapsed(TimeUnit.SECONDS);
+        System.out.printf("%s - %,d [%,d / sec]\n", stopwatch, count, rate);
+      }
+    }, DISPLAY_DELAY_SEC, DISPLAY_DELAY_SEC, TimeUnit.SECONDS);
     ConcurrentTestHarness.timeTasks(25, new Runnable() {
-      @Override
-      public void run() {
+      @Override public void run() {
         Integer id = 1;
         for (;;) {
           Integer resource = multiway.borrow(id, resourceLoader, 100, TimeUnit.MICROSECONDS);
           multiway.release(resource, 100, TimeUnit.MICROSECONDS);
-          yield();
+          calls.increment();
         }
-      }
-      void yield() {
-        Thread.yield();
-        LockSupport.parkNanos(250L);
       }
     });
   }

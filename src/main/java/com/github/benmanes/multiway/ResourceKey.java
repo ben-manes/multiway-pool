@@ -15,7 +15,6 @@
  */
 package com.github.benmanes.multiway;
 
-import java.util.concurrent.TransferQueue;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.annotation.concurrent.GuardedBy;
@@ -25,7 +24,7 @@ import com.github.benmanes.multiway.ResourceKey.Status;
 import com.google.common.base.Objects;
 
 /**
- * A key to the resource in the cache and the transfer queue.
+ * A key to the resource in the cache and the transfer stack.
  *
  * @author Ben Manes (ben.manes@gmail.com)
  */
@@ -50,14 +49,14 @@ abstract class ResourceKey<K> extends AtomicReference<Status> implements Linked<
   }
 
   final K key;
-  final TransferQueue<ResourceKey<K>> queue;
+  final EliminationStack<ResourceKey<K>> stack;
 
   Object handle;
 
-  ResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key) {
+  ResourceKey(EliminationStack<ResourceKey<K>> stack, Status status, K key) {
     super(status);
     this.key = key;
-    this.queue = queue;
+    this.stack = stack;
   }
 
   /** Retrieves the resource category key. */
@@ -70,14 +69,14 @@ abstract class ResourceKey<K> extends AtomicReference<Status> implements Linked<
     return get();
   }
 
-  /** Retrieves the transfer queue the resource is associated with. */
-  TransferQueue<ResourceKey<K>> getQueue() {
-    return queue;
+  /** Retrieves the transfer stack the resource is associated with. */
+  EliminationStack<ResourceKey<K>> getStack() {
+    return stack;
   }
 
-  /** Removes the resource key from its transfer queue. */
-  void removeFromTransferQueue() {
-    getQueue().remove(this);
+  /** Removes the resource key from its transfer stack. */
+  void removeFromTransferStack() {
+    getStack().remove(this);
   }
 
   /** Retrieves the time, in nanoseconds, that the resource became idle in the pool. */
@@ -141,8 +140,8 @@ abstract class ResourceKey<K> extends AtomicReference<Status> implements Linked<
   static final class UnlinkedResourceKey<K> extends ResourceKey<K> {
     private static final long serialVersionUID = 1L;
 
-    UnlinkedResourceKey(TransferQueue<ResourceKey<K>> queue, Status status, K key) {
-      super(queue, status, key);
+    UnlinkedResourceKey(EliminationStack<ResourceKey<K>> stack, Status status, K key) {
+      super(stack, status, key);
     }
 
     @Override
@@ -199,9 +198,9 @@ abstract class ResourceKey<K> extends AtomicReference<Status> implements Linked<
     final Runnable removalTask;
     volatile long accessTimeNanos;
 
-    LinkedResourceKey(TransferQueue<ResourceKey<K>> queue, Status status,
+    LinkedResourceKey(EliminationStack<ResourceKey<K>> stack, Status status,
         K key, final LinkedDeque<ResourceKey<K>> idleQueue) {
-      super(queue, status, key);
+      super(stack, status, key);
       this.addTask = new Runnable() {
         @Override
         @GuardedBy("idleLock")

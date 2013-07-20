@@ -15,8 +15,6 @@
  */
 package com.github.benmanes.multiway;
 
-import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -37,34 +35,22 @@ import static com.google.common.base.Preconditions.checkNotNull;
 @ThreadSafe
 final class TimeToIdlePolicy<K, R> {
   static final int AMORTIZED_THRESHOLD = 16;
-  static final int TASK_QUEUE_MASK = ceilingNextPowerOfTwo(
-      Runtime.getRuntime().availableProcessors()) - 1;
-
-  static int ceilingNextPowerOfTwo(int x) {
-    // From Hacker's Delight, Chapter 3, Harry S. Warren Jr.
-    return 1 << (Integer.SIZE - Integer.numberOfLeadingZeros(x - 1));
-  }
 
   final LinkedDeque<ResourceKey<K>> idleQueue;
   final EvictionListener<K> evictionListener;
-  final Queue<Runnable>[] taskQueues;
+  final EliminationStack<Runnable> taskStack;
   final long expireAfterAccessNanos;
   final Lock idleLock;
   final Ticker ticker;
 
-  @SuppressWarnings("unchecked")
   TimeToIdlePolicy(long expireAfterAccessNanos,
       Ticker ticker, EvictionListener<K> evictionListener) {
     this.ticker = ticker;
     this.idleLock = new ReentrantLock();
     this.idleQueue = new LinkedDeque<>();
-    this.taskQueues = new Queue[TASK_QUEUE_MASK + 1];
+    this.taskStack = new EliminationStack<>();
     this.expireAfterAccessNanos = expireAfterAccessNanos;
     this.evictionListener = checkNotNull(evictionListener);
-
-    for (int i = 0; i < taskQueues.length; i++) {
-      taskQueues[i] = new ConcurrentLinkedQueue<>();
-    }
   }
 
   /** Adds an idle resource to be tracked for expiration. */
@@ -80,8 +66,7 @@ final class TimeToIdlePolicy<K, R> {
 
   /** Schedules the task to be applied to the idle policy. */
   void schedule(ResourceKey<K> key, Runnable task) {
-    int index = key.hashCode() & TASK_QUEUE_MASK;
-    taskQueues[index].add(task);
+    taskStack.push(task);
     cleanUp(AMORTIZED_THRESHOLD);
   }
 
@@ -99,7 +84,7 @@ final class TimeToIdlePolicy<K, R> {
   void cleanUp(int threshold) {
     if (idleLock.tryLock()) {
       try {
-        drainTaskQueue(threshold);
+        drainTaskStack(threshold);
         evict(threshold);
       } finally {
         idleLock.unlock();
@@ -109,19 +94,13 @@ final class TimeToIdlePolicy<K, R> {
 
   /** Applies the pending operations, up to the threshold limit, in the task queue. */
   @GuardedBy("idleLock")
-  void drainTaskQueue(int threshold) {
-    int ran = 0;
-    for (Queue<Runnable> taskQueue : taskQueues) {
-      for (; ran < threshold; ran++) {
-        Runnable task = taskQueue.poll();
-        if (task == null) {
-          break;
-        }
-        task.run();
-      }
-      if (ran == threshold) {
+  void drainTaskStack(int threshold) {
+    for (int ran = 0; ran < threshold; ran++) {
+      Runnable task = taskStack.pop();
+      if (task == null) {
         return;
       }
+      task.run();
     }
   }
 
