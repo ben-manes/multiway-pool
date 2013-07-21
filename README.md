@@ -30,3 +30,6 @@ try {
   pool.release(connection);
 }
 ```
+
+Optimized using [JProfiler](http://www.ej-technologies.com/products/jprofiler/overview.html), a
+full-featured Java profiler licensed freely to open source projects.
