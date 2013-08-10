@@ -23,6 +23,7 @@ dependencies {
   compile 'it.unimi.dsi:fastutil:6.5.6'
   compile "com.google.guava:guava:${guava}"
   compile 'com.google.code.findbugs:jsr305:2.0.1'
+  compile "com.googlecode.concurrentlinkedhashmap:concurrentlinkedhashmap-lru:1.4"
 
   testCompile 'com.twitter:jsr166e:1.0.0'
   testCompile 'org.hamcrest:hamcrest-all:1.3'

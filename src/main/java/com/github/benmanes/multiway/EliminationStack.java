@@ -358,7 +358,7 @@ final class EliminationStack<E> extends AbstractCollection<E> implements Seriali
    * @return the queue
    */
   public Queue<E> asLifoQueue() {
-    return new AsLIFOQueue<>(this);
+    return new AsLifoQueue<>(this);
   }
 
   /**
@@ -578,11 +578,11 @@ final class EliminationStack<E> extends AbstractCollection<E> implements Seriali
   }
 
   /** A view as a last-in-first-out (Lifo) {@link Queue}. */
-  static class AsLIFOQueue<E> extends AbstractQueue<E> implements Queue<E>, Serializable {
+  static class AsLifoQueue<E> extends AbstractQueue<E> implements Queue<E>, Serializable {
     private static final long serialVersionUID = 1L;
     private final EliminationStack<E> stack;
 
-    AsLIFOQueue(EliminationStack<E> stack) {
+    AsLifoQueue(EliminationStack<E> stack) {
       this.stack = stack;
     }
 

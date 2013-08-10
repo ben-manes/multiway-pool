@@ -15,11 +15,10 @@
  */
 package com.github.benmanes.multiway;
 
-import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Nullable;
@@ -41,8 +40,8 @@ import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
 import com.google.common.cache.Weigher;
 import com.google.common.collect.ArrayListMultimap;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
+import com.googlecode.concurrentlinkedhashmap.ConcurrentLinkedHashMap;
 import it.unimi.dsi.fastutil.objects.Reference2ReferenceOpenHashMap;
 
 import static com.github.benmanes.multiway.TimeToIdlePolicy.AMORTIZED_THRESHOLD;
@@ -81,22 +80,28 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
    * referencing to the queue then the garbage collector will eagerly discard the transfer queue.
    */
 
-  final LoadingCache<K, EliminationStack<ResourceKey<K>>> transferStacks;
+  final ConcurrentHashMapV8.Fun<K, EliminationStack<ResourceKey<K>>> stackLoader;
+  final ConcurrentHashMapV8<K, EliminationStack<ResourceKey<K>>> transferStacks;
   final ResourceLifecycle<? super K, ? super R> lifecycle;
   final Optional<TimeToIdlePolicy<K, R>> timeToIdlePolicy;
   final ThreadLocal<Map<R, ResourceHandle>> inFlight;
-  final Cache<ResourceKey<K>, R> cache;
+  final ConcurrentMap<ResourceKey<K>, R> cache;
   final Ticker ticker;
 
   TransferPool(MultiwayPoolBuilder<? super K, ? super R> builder) {
-    transferStacks = makeTransferStacks(builder.getConcurrencyLevel());
     timeToIdlePolicy = makeTimeToIdlePolicy(builder);
+    transferStacks = new ConcurrentHashMapV8<>();
     lifecycle = builder.getResourceLifecycle();
     ticker = builder.getTicker();
     cache = makeCache(builder);
     inFlight = new ThreadLocal<Map<R, ResourceHandle>>() {
       @Override protected Map<R, ResourceHandle> initialValue() {
         return new Reference2ReferenceOpenHashMap<>();
+      }
+    };
+    stackLoader = new ConcurrentHashMapV8.Fun<K, EliminationStack<ResourceKey<K>>>() {
+      @Override public EliminationStack<ResourceKey<K>> apply(K key) {
+        return new EliminationStack<>();
       }
     };
   }
@@ -111,8 +116,14 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
         });
   }
 
+  ConcurrentMap<ResourceKey<K>, R> makeCache(MultiwayPoolBuilder<? super K, ? super R> builder) {
+    return new ConcurrentLinkedHashMap.Builder<ResourceKey<K>, R>()
+        .maximumWeightedCapacity(builder.maximumSize)
+        .build();
+  }
+
   /** Creates the denormalized cache of resources based on the builder configuration. */
-  Cache<ResourceKey<K>, R> makeCache(MultiwayPoolBuilder<? super K, ? super R> builder) {
+  Cache<ResourceKey<K>, R> __makeCache(MultiwayPoolBuilder<? super K, ? super R> builder) {
     CacheBuilder<Object, Object> cacheBuilder = CacheBuilder.newBuilder();
     if (builder.maximumSize != MultiwayPoolBuilder.UNSET_INT) {
       cacheBuilder.maximumSize(builder.maximumSize);
@@ -181,7 +192,10 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   /** Retrieves the next available handler, creating the resource if necessary. */
   ResourceHandle getResourceHandle(K key,
       Callable<? extends R> loader, long timeout, TimeUnit unit) {
-    EliminationStack<ResourceKey<K>> stack = transferStacks.getUnchecked(key);
+    EliminationStack<ResourceKey<K>> stack = transferStacks.get(key);
+    if (stack == null) {
+      stack = transferStacks.computeIfAbsent(key, stackLoader);
+    }
     long timeoutNanos = unit.toNanos(timeout);
     long startNanos = ticker.read();
     boolean hasCleanedUp = false;
@@ -221,22 +235,18 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       final ResourceKey<K> resourceKey = timeToIdlePolicy.isPresent()
           ? new LinkedResourceKey<K>(stack, Status.IN_FLIGHT, key, timeToIdlePolicy.get().idleQueue)
           : new UnlinkedResourceKey<K>(stack, Status.IN_FLIGHT, key);
-      R resource = cache.get(resourceKey, new Callable<R>() {
-        @Override public R call() throws Exception {
-          R resource = loader.call();
-          try {
-            lifecycle.onCreate(resourceKey.getKey(), resource);
-            return resource;
-          } catch (Exception e) {
-            lifecycle.onRemoval(resourceKey.getKey(), resource);
-            throw e;
-          }
-        }
-      });
+      R resource = loader.call();
+      try {
+        lifecycle.onCreate(resourceKey.getKey(), resource);
+        cache.put(resourceKey, resource);
+      } catch (Exception e) {
+        lifecycle.onRemoval(resourceKey.getKey(), resource);
+        throw e;
+      }
       ResourceHandle handle = new ResourceHandle(resourceKey, resource);
       resourceKey.handle = handle;
       return handle;
-    } catch (ExecutionException e) {
+    } catch (Exception e) {
       throw Throwables.propagate(e.getCause());
     }
   }
@@ -244,7 +254,7 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   /** Attempts to get the pooled resource with the given key. */
   @SuppressWarnings("unchecked")
   @Nullable ResourceHandle tryToGetPooledResourceHandle(ResourceKey<K> resourceKey) {
-    R resource = cache.getIfPresent(resourceKey);
+    R resource = cache.get(resourceKey);
     if (resource == null) {
       return null;
     }
@@ -283,18 +293,18 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
   public void invalidate(K key) {
     checkNotNull(key);
 
-    List<ResourceKey<K>> resourceKeys = Lists.newArrayList();
-    for (ResourceKey<K> resourceKey : cache.asMap().keySet()) {
+    for (ResourceKey<K> resourceKey : cache.keySet()) {
       if (resourceKey.getKey().equals(key)) {
-        resourceKeys.add(resourceKey);
+        R resource = cache.remove(resourceKey);
+        // TODO(ben): call removal listener
       }
     }
-    cache.invalidateAll(resourceKeys);
   }
 
   @Override
   public void invalidateAll() {
-    cache.invalidateAll();
+    cache.clear();
+    // TODO(ben): call removal listener
   }
 
   @Override
@@ -307,18 +317,17 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
     if (timeToIdlePolicy.isPresent()) {
       timeToIdlePolicy.get().cleanUp(Integer.MAX_VALUE);
     }
-    cache.cleanUp();
   }
 
   @Override
   public CacheStats stats() {
-    return cache.stats();
+    return null;//cache.stats();
   }
 
   @Override
   public String toString() {
     Multimap<K, R> multimap = ArrayListMultimap.create();
-    for (Entry<ResourceKey<K>, R> entry : cache.asMap().entrySet()) {
+    for (Entry<ResourceKey<K>, R> entry : cache.entrySet()) {
       multimap.put(entry.getKey().getKey(), entry.getValue());
     }
     return multimap.toString();
@@ -369,7 +378,8 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       try {
         lifecycle.onRelease(resourceKey.getKey(), resource);
       } catch (Exception e) {
-        cache.invalidate(resourceKey);
+        // TODO(ben): call removal listener
+        cache.remove(resourceKey);
         throw e;
       } finally {
         recycle(timeout, unit);
@@ -380,7 +390,8 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
       try {
         lifecycle.onRelease(resourceKey.getKey(), resource);
       } finally {
-        cache.invalidate(resourceKey);
+        // TODO(ben): call removal listener
+        cache.remove(resourceKey);
         recycle(0L, TimeUnit.NANOSECONDS);
       }
     }
@@ -513,7 +524,8 @@ class TransferPool<K, R> implements MultiwayPool<K, R> {
         switch (status) {
           case IDLE:
             if (resourceKey.goFromIdleToRetired()) {
-              cache.invalidate(resourceKey);
+              // TODO(ben): call removal listener
+              cache.remove(resourceKey);
               return;
             }
             break;
